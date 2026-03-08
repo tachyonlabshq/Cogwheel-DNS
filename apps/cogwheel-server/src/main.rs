@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, router};
 use cogwheel_classifier::ClassifierSettings;
-use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig};
+use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot};
 use cogwheel_lists::{
     SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source, parse_source,
     synthetic_source, verify_candidate,
@@ -237,6 +237,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
         .route("/api/v1/services/toggles", post(update_service_toggle))
+        .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -325,6 +326,14 @@ async fn list_audit_events(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn runtime_snapshot(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<DnsRuntimeSnapshot>>, axum::http::StatusCode> {
+    Ok(Json(ApiEnvelope {
+        data: state.dns_runtime.snapshot(),
+    }))
 }
 
 async fn refresh_sources(

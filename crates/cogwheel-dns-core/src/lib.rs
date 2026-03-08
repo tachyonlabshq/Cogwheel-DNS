@@ -9,6 +9,7 @@ use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 use serde::Serialize;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -25,6 +26,8 @@ pub struct DnsRuntime {
     policy: Arc<RwLock<Arc<PolicyEngine>>>,
     classifier_settings: ClassifierSettings,
     cache: Cache<String, CachedLookup>,
+    fallback_cache: Cache<String, CachedLookup>,
+    stats: Arc<DnsRuntimeStats>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +42,20 @@ struct CachedLookup {
     response: Message,
 }
 
+#[derive(Debug, Default)]
+pub struct DnsRuntimeStats {
+    upstream_failures_total: AtomicU64,
+    fallback_served_total: AtomicU64,
+    cache_hits_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DnsRuntimeSnapshot {
+    pub upstream_failures_total: u64,
+    pub fallback_served_total: u64,
+    pub cache_hits_total: u64,
+}
+
 impl DnsRuntime {
     pub fn new(
         resolver: TokioResolver,
@@ -50,12 +67,22 @@ impl DnsRuntime {
             policy: Arc::new(RwLock::new(policy)),
             classifier_settings,
             cache: Cache::new(10_000),
+            fallback_cache: Cache::new(10_000),
+            stats: Arc::new(DnsRuntimeStats::default()),
         }
     }
 
     pub fn replace_policy(&self, policy: Arc<PolicyEngine>) {
         if let Ok(mut guard) = self.policy.write() {
             *guard = policy;
+        }
+    }
+
+    pub fn snapshot(&self) -> DnsRuntimeSnapshot {
+        DnsRuntimeSnapshot {
+            upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
+            fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
+            cache_hits_total: self.stats.cache_hits_total.load(Ordering::Relaxed),
         }
     }
 
@@ -131,6 +158,7 @@ impl DnsRuntime {
         }
 
         if let Some(cached) = self.cache.get(&domain).await {
+            self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
             return Ok(cached.response);
         }
 
@@ -139,7 +167,33 @@ impl DnsRuntime {
 
         let response = match decision.kind {
             DecisionKind::Blocked(mode) => build_blocked_response(&request, mode),
-            DecisionKind::Allowed => self.resolve_upstream(&request, &domain).await?,
+            DecisionKind::Allowed => match self.resolve_upstream(&request, &domain).await {
+                Ok(response) => {
+                    self.fallback_cache
+                        .insert(
+                            domain.clone(),
+                            CachedLookup {
+                                response: response.clone(),
+                            },
+                        )
+                        .await;
+                    response
+                }
+                Err(error) => {
+                    self.stats
+                        .upstream_failures_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(fallback) = self.fallback_cache.get(&domain).await {
+                        self.stats
+                            .fallback_served_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(%domain, %error, "serving fallback DNS response after upstream failure");
+                        fallback.response
+                    } else {
+                        return Err(error);
+                    }
+                }
+            },
         };
 
         self.cache
@@ -215,4 +269,27 @@ fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_snapshot_starts_at_zero() {
+        let stats = DnsRuntimeStats::default();
+        let snapshot = DnsRuntimeSnapshot {
+            upstream_failures_total: stats.upstream_failures_total.load(Ordering::Relaxed),
+            fallback_served_total: stats.fallback_served_total.load(Ordering::Relaxed),
+            cache_hits_total: stats.cache_hits_total.load(Ordering::Relaxed),
+        };
+        assert_eq!(
+            snapshot,
+            DnsRuntimeSnapshot {
+                upstream_failures_total: 0,
+                fallback_served_total: 0,
+                cache_hits_total: 0,
+            }
+        );
+    }
 }

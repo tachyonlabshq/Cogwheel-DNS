@@ -103,7 +103,7 @@ Goal: Production-capable DNS filtering backend running in Docker.
 
 - [x] Implement UDP/TCP listeners and upstream forwarding.
 - [x] Add deterministic policy pipeline (allow/deny/rewrite).
-- [ ] Implement cache layers (L1 in-process + resilient L2 fallback cache).
+- [x] Implement cache layers (L1 in-process + resilient L2 fallback cache).
 - [x] Implement block response modes (`null_ip`, `nxdomain`, `nodata`, `refused`, `custom_ip`).
 - [ ] Add bounded recursive CNAME uncloaking for canonical-domain matching.
 - [x] Add `/health/live`, `/health/ready`, and metrics endpoints.
@@ -130,7 +130,7 @@ Goal: Make list updates safe, auditable, and user-invisible.
 Current implementation notes:
 
 - Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
-- Remaining Phase 3 gaps are richer regression/SLO signals beyond protected-domain rollback guards.
+- Remaining Phase 3 gaps are richer regression/SLO signals beyond protected-domain rollback guards, though runtime fallback counters are now exposed for observability.
 
 Exit criteria:
 
