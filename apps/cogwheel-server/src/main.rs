@@ -1769,6 +1769,11 @@ fn should_deliver_notification(settings: &NotificationSettings, severity: &str) 
         && severity_rank(severity) >= severity_rank(&settings.min_severity)
 }
 
+fn notification_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1u64.checked_shl(attempt.min(4) as u32).unwrap_or(16);
+    Duration::from_millis(250 * multiplier)
+}
+
 async fn send_security_notification(
     client: &Client,
     settings: &NotificationSettings,
@@ -1792,6 +1797,66 @@ async fn send_security_notification(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+async fn deliver_security_notification(
+    storage: &Storage,
+    client: &Client,
+    settings: &NotificationSettings,
+    security_event: &SecurityEventRecord,
+) -> Result<()> {
+    let mut last_error = None;
+
+    for attempt in 0..3 {
+        match send_security_notification(client, settings, security_event).await {
+            Ok(()) => {
+                storage
+                    .record_audit_event(&AuditEvent {
+                        id: Uuid::new_v4(),
+                        event_type: "security.alert_delivery_succeeded".to_string(),
+                        payload: serde_json::to_string(&serde_json::json!({
+                            "severity": security_event.severity,
+                            "domain": security_event.domain,
+                            "client_ip": security_event.client_ip,
+                            "device_name": security_event.device_name,
+                            "attempts": attempt + 1,
+                        }))?,
+                        created_at: security_event.created_at,
+                    })
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt < 2 {
+                    tokio::time::sleep(notification_retry_delay(attempt)).await;
+                }
+            }
+        }
+    }
+
+    let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
+
+    storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "security.alert_delivery_failed".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "severity": security_event.severity,
+                "domain": security_event.domain,
+                "client_ip": security_event.client_ip,
+                "device_name": security_event.device_name,
+                "attempts": 3,
+                "error": error_message.clone(),
+            }))?,
+            created_at: security_event.created_at,
+        })
+        .await?;
+
+    anyhow::bail!(
+        "security alert delivery failed after retries: {}",
+        error_message
+    )
 }
 
 async fn record_security_event_from_classification(
@@ -1837,7 +1902,8 @@ async fn record_security_event_from_classification(
             .await?;
     }
     if should_deliver_notification(&current_notification_settings, &security_event.severity) {
-        send_security_notification(
+        deliver_security_notification(
+            storage.as_ref(),
             &http_client,
             &current_notification_settings,
             &security_event,
@@ -2041,6 +2107,13 @@ mod tests {
         assert!(!should_deliver_notification(&settings, "medium"));
         assert!(should_deliver_notification(&settings, "high"));
         assert!(should_deliver_notification(&settings, "critical"));
+    }
+
+    #[test]
+    fn notification_retry_delay_backs_off() {
+        assert_eq!(notification_retry_delay(0), Duration::from_millis(250));
+        assert_eq!(notification_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(notification_retry_delay(2), Duration::from_millis(1000));
     }
 
     #[test]
