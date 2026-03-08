@@ -199,6 +199,40 @@ export default function App() {
     [settings.services],
   );
 
+  const selectedDeviceServiceManifest = useMemo(
+    () => (deviceServiceOverrideId ? serviceInfoMap.get(deviceServiceOverrideId) ?? null : null),
+    [deviceServiceOverrideId, serviceInfoMap],
+  );
+
+  const pendingDeviceServiceOverride = useMemo(
+    () => deviceServiceOverrides.find((item) => item.service_id === deviceServiceOverrideId) ?? null,
+    [deviceServiceOverrideId, deviceServiceOverrides],
+  );
+
+  const deviceServiceOverrideIsNoop = pendingDeviceServiceOverride?.mode === deviceServiceOverrideMode;
+
+  const deviceServiceOverridePreview = useMemo(() => {
+    if (!selectedDeviceServiceManifest) return null;
+
+    const domains = deviceServiceOverrideMode === "allow"
+      ? Array.from(new Set([
+          ...selectedDeviceServiceManifest.allow_domains,
+          ...selectedDeviceServiceManifest.block_domains,
+          ...selectedDeviceServiceManifest.exceptions,
+        ]))
+      : selectedDeviceServiceManifest.block_domains;
+
+    return {
+      serviceId: selectedDeviceServiceManifest.service_id,
+      displayName: selectedDeviceServiceManifest.display_name,
+      category: selectedDeviceServiceManifest.category,
+      riskNotes: selectedDeviceServiceManifest.risk_notes,
+      domains,
+      exceptions: selectedDeviceServiceManifest.exceptions,
+      sampleDomains: domains.slice(0, 4),
+    };
+  }, [deviceServiceOverrideMode, selectedDeviceServiceManifest]);
+
   async function handleClassifierUpdate(mode: SettingsSummary["classifier"]["mode"]) {
     setBusyAction(`classifier-mode-${mode}`);
     try {
@@ -476,13 +510,40 @@ export default function App() {
   }
 
   function addDeviceServiceOverride() {
-    if (!deviceServiceOverrideId) return;
+    if (devicePolicyMode !== "custom") {
+      pushToast("Custom mode required", "Switch the device to custom policy mode before adding service rules.", "error");
+      return;
+    }
+    if (!deviceServiceOverrideId) {
+      pushToast("Service required", "Choose a built-in service before adding a device rule.", "error");
+      return;
+    }
+    if (!selectedDeviceServiceManifest) {
+      pushToast("Unknown service", "Reload settings and pick the service again before saving the device rule.", "error");
+      return;
+    }
+    if (!deviceServiceOverridePreview || deviceServiceOverridePreview.domains.length === 0) {
+      pushToast("Service rule unavailable", "This service does not currently expand into any device-specific domains for the selected mode.", "error");
+      return;
+    }
+    if (deviceServiceOverrideIsNoop) {
+      pushToast("Service rule already queued", `${selectedDeviceServiceManifest.display_name} is already using ${deviceServiceOverrideMode} mode for this device.`, "error");
+      return;
+    }
+
     setDeviceServiceOverrides((current) => {
       const next = current.filter((item) => item.service_id !== deviceServiceOverrideId);
       next.push({ service_id: deviceServiceOverrideId, mode: deviceServiceOverrideMode });
       next.sort((left, right) => left.service_id.localeCompare(right.service_id));
       return next;
     });
+    pushToast(
+      "Service rule added",
+      pendingDeviceServiceOverride
+        ? `${selectedDeviceServiceManifest.display_name} now uses ${deviceServiceOverrideMode} mode for this device.`
+        : `${selectedDeviceServiceManifest.display_name} expands into ${deviceServiceOverridePreview.domains.length} device-specific domain rule${deviceServiceOverridePreview.domains.length === 1 ? "" : "s"}.`,
+      "success",
+    );
   }
 
   function removeDeviceServiceOverride(serviceId: string) {
@@ -954,7 +1015,7 @@ export default function App() {
       <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
         <Card>
           <CardTitle>Devices</CardTitle>
-          <CardDescription>Name devices and choose whether they inherit the global policy or carry a custom profile override.</CardDescription>
+          <CardDescription>Name devices and choose whether they inherit the global policy or carry a custom profile override with validated service-rule previews.</CardDescription>
           <div className="mt-5 grid gap-3">
             <div className="grid gap-3 md:grid-cols-2">
               <Input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="MacBook Pro" />
@@ -1001,10 +1062,59 @@ export default function App() {
                 <option value="allow">Allow service</option>
                 <option value="block">Block service</option>
               </select>
-              <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId}>
+              <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId || deviceServiceOverrideIsNoop}>
                 Add service rule
               </Button>
             </div>
+            {devicePolicyMode !== "custom" ? (
+              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                Switch to custom policy mode to preview and add per-device service overrides.
+              </div>
+            ) : deviceServiceOverrideId && deviceServiceOverridePreview ? (
+              <div className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{deviceServiceOverridePreview.displayName}</div>
+                    <div className="mt-1 text-sm text-muted-foreground">{deviceServiceOverridePreview.riskNotes}</div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <Badge>{deviceServiceOverrideMode}</Badge>
+                    <Badge>{deviceServiceOverridePreview.category}</Badge>
+                    <Badge>
+                      {deviceServiceOverridePreview.domains.length} expanded domain{deviceServiceOverridePreview.domains.length === 1 ? "" : "s"}
+                    </Badge>
+                    {deviceServiceOverridePreview.exceptions.length > 0 ? (
+                      <Badge>{deviceServiceOverridePreview.exceptions.length} exception{deviceServiceOverridePreview.exceptions.length === 1 ? "" : "s"}</Badge>
+                    ) : null}
+                    {deviceServiceOverrideIsNoop ? <Badge>already queued</Badge> : null}
+                    {pendingDeviceServiceOverride && !deviceServiceOverrideIsNoop ? <Badge>replaces pending {pendingDeviceServiceOverride.mode}</Badge> : null}
+                  </div>
+                </div>
+                <div className="mt-3 text-sm text-muted-foreground">
+                  {deviceServiceOverrideMode === "allow"
+                    ? "Allow mode expands allow, block, and exception domains so the service keeps working for this device."
+                    : "Block mode expands blocked domains and preserves manifest exceptions so essential endpoints can still resolve."}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {deviceServiceOverridePreview.sampleDomains.map((domain) => (
+                    <Badge key={domain}>{domain}</Badge>
+                  ))}
+                  {deviceServiceOverridePreview.domains.length > deviceServiceOverridePreview.sampleDomains.length ? (
+                    <Badge>
+                      +{deviceServiceOverridePreview.domains.length - deviceServiceOverridePreview.sampleDomains.length} more
+                    </Badge>
+                  ) : null}
+                </div>
+              </div>
+            ) : deviceServiceOverrideId ? (
+              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                The selected service does not currently expose any domains for this override mode.
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                Select a service to preview the domains and exceptions that will be attached to this device rule.
+              </div>
+            )}
             {deviceServiceOverrides.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {deviceServiceOverrides.map((override) => (
