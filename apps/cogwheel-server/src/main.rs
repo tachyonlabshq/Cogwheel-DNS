@@ -99,9 +99,11 @@ struct DashboardSummary {
 #[derive(Debug, Clone, serde::Serialize)]
 struct NotificationDeliveryEvent {
     status: String,
+    event_type: String,
     severity: String,
     title: String,
     summary: String,
+    target: String,
     domain: String,
     device_name: Option<String>,
     client_ip: String,
@@ -2281,6 +2283,11 @@ fn build_notification_delivery_events(
                 _ => return None,
             };
             let payload: serde_json::Value = serde_json::from_str(&event.payload).ok()?;
+            let event_type = payload
+                .get("event_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("security.alert_raised")
+                .to_string();
             let title = payload
                 .get("title")
                 .and_then(serde_json::Value::as_str)
@@ -2317,6 +2324,7 @@ fn build_notification_delivery_events(
                 });
             Some(NotificationDeliveryEvent {
                 status: status.to_string(),
+                event_type,
                 severity: payload
                     .get("severity")
                     .and_then(serde_json::Value::as_str)
@@ -2324,6 +2332,12 @@ fn build_notification_delivery_events(
                     .to_string(),
                 title,
                 summary,
+                target: payload
+                    .get("device_name")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| payload.get("client_ip").and_then(serde_json::Value::as_str))
+                    .unwrap_or("control-plane")
+                    .to_string(),
                 domain: payload
                     .get("domain")
                     .and_then(serde_json::Value::as_str)
@@ -3190,7 +3204,9 @@ mod tests {
 
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].event_type, "security.alert_raised");
         assert_eq!(deliveries[0].title, "notify.example");
+        assert_eq!(deliveries[0].target, "Laptop");
         assert_eq!(deliveries[0].domain, "notify.example");
         assert_eq!(deliveries[0].attempts, 2);
     }
@@ -3214,11 +3230,13 @@ mod tests {
 
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].event_type, "ruleset.rollback");
         assert_eq!(deliveries[0].title, "Ruleset rolled back");
         assert_eq!(
             deliveries[0].summary,
             "Rolled back to the previous verified ruleset."
         );
+        assert_eq!(deliveries[0].target, "control-plane");
         assert_eq!(deliveries[0].client_ip, "control-plane");
         assert_eq!(deliveries[0].domain, "control-plane");
     }

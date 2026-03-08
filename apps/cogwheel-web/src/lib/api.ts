@@ -103,9 +103,11 @@ export type NotificationSettings = {
 
 export type NotificationDeliveryEvent = {
   status: string;
+  event_type: string;
   severity: string;
   title: string;
   summary: string;
+  target: string;
   domain: string;
   device_name: string | null;
   client_ip: string;
