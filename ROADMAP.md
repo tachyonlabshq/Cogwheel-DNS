@@ -194,6 +194,7 @@ Current implementation notes:
 - Devices with custom policy mode can now carry per-device service overrides that expand into device-specific allow/block behavior using the built-in service manifest catalog.
 - The device editor now shows service overrides with friendly manifest labels in both edit chips and saved-device summaries, making per-device service policy easier to review.
 - Device service override summaries now expose manifest category and risk notes inline, so operators can understand why each per-device service rule exists without cross-referencing the global services panel.
+- The device editor now previews service override domain expansion before saving and blocks no-op additions when a service cannot produce device-specific rules for the selected mode.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 
