@@ -75,6 +75,7 @@ export default function App() {
   const [devicePolicyMode, setDevicePolicyMode] = useState<"global" | "custom">("global");
   const [deviceProfileOverride, setDeviceProfileOverride] = useState("");
   const [deviceProtectionOverride, setDeviceProtectionOverride] = useState<"inherit" | "bypass">("inherit");
+  const [deviceAllowedDomains, setDeviceAllowedDomains] = useState("");
 
   async function load() {
     setState("loading");
@@ -119,6 +120,7 @@ export default function App() {
     setDevicePolicyMode("global");
     setDeviceProfileOverride("");
     setDeviceProtectionOverride("inherit");
+    setDeviceAllowedDomains("");
   }
 
   const enabledBlocklists = useMemo(
@@ -305,6 +307,12 @@ export default function App() {
         policy_mode: devicePolicyMode,
         blocklist_profile_override: devicePolicyMode === "custom" ? deviceProfileOverride || null : null,
         protection_override: devicePolicyMode === "custom" ? deviceProtectionOverride : "inherit",
+        allowed_domains: devicePolicyMode === "custom"
+          ? deviceAllowedDomains
+              .split(",")
+              .map((domain) => domain.trim())
+              .filter(Boolean)
+          : [],
       });
       pushToast(deviceId ? "Device updated" : "Device added", `${deviceName} is now tracked in the control plane.`, "success");
       resetDeviceForm();
@@ -323,6 +331,7 @@ export default function App() {
     setDevicePolicyMode(device.policy_mode);
     setDeviceProfileOverride(device.blocklist_profile_override ?? "");
     setDeviceProtectionOverride(device.protection_override);
+    setDeviceAllowedDomains(device.allowed_domains.join(", "));
   }
 
   return (
@@ -688,6 +697,12 @@ export default function App() {
                 <option value="inherit">Inherit blocking</option>
                 <option value="bypass">Bypass blocking</option>
               </select>
+              <Input
+                value={deviceAllowedDomains}
+                onChange={(event) => setDeviceAllowedDomains(event.target.value)}
+                placeholder="example.com, cdn.example.com"
+                disabled={devicePolicyMode !== "custom"}
+              />
               <div className="flex gap-2">
                 <Button onClick={() => void handleDeviceSubmit()} disabled={!deviceName || !deviceIpAddress || busyAction === "device-submit"}>
                   {deviceId ? "Save device" : "Add device"}
@@ -714,6 +729,11 @@ export default function App() {
                     <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
                       <Badge>{device.blocklist_profile_override ?? "inherits global profile"}</Badge>
                       <Badge>{device.protection_override === "bypass" ? "blocking bypassed" : "inherits blocking"}</Badge>
+                      <Badge>
+                        {device.allowed_domains.length > 0
+                          ? `${device.allowed_domains.length} allowed domain${device.allowed_domains.length === 1 ? "" : "s"}`
+                          : "no device allowlist"}
+                      </Badge>
                     </div>
                     <div className="mt-4">
                       <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>

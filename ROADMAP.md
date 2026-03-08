@@ -181,6 +181,7 @@ Current implementation notes:
 - Webhook delivery now retries with backoff and records explicit delivery success/failure audit events for operator visibility.
 - Runtime startup now attempts to warm the profile policy catalog from persisted sources, and rollback rebuilds profile policies while restoring the selected global artifact.
 - Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
+- Devices with custom policy mode can now carry per-device allowed-domain lists, letting selected domains bypass blocking for a specific device without changing the global profile.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 
