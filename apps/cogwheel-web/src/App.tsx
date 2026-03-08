@@ -193,6 +193,51 @@ export default function App() {
     [auditEventFilter, dashboard.latest_audit_events],
   );
 
+  const controlPlaneStatus = useMemo(() => {
+    if (state === "loading" || busyAction === "refresh-sources" || busyAction === "rollback-ruleset" || busyAction === "runtime-health-check") {
+      return {
+        label: "Updating",
+        detail: "Cogwheel is applying or checking control-plane changes right now.",
+        tone: "secondary" as const,
+        action: "wait" as const,
+      };
+    }
+
+    if (error) {
+      return {
+        label: "Needs attention",
+        detail: error,
+        tone: "ghost" as const,
+        action: "refresh" as const,
+      };
+    }
+
+    if (dashboard.runtime_health.degraded) {
+      return {
+        label: "Needs attention",
+        detail: dashboard.runtime_health.notes[0] ?? "Runtime guard detected a degraded state.",
+        tone: "ghost" as const,
+        action: "health-check" as const,
+      };
+    }
+
+    if (dashboard.notification_health.failed_count > 0 && dashboard.notification_health.failed_count >= dashboard.notification_health.delivered_count) {
+      return {
+        label: "Needs attention",
+        detail: "Notification delivery is failing often enough to hide important security and recovery signals.",
+        tone: "ghost" as const,
+        action: "notifications" as const,
+      };
+    }
+
+    return {
+      label: "Protected",
+      detail: "Runtime health, sources, and delivery checks look stable from the control plane.",
+      tone: "primary" as const,
+      action: "refresh" as const,
+    };
+  }, [busyAction, dashboard.notification_health.delivered_count, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes, error, state]);
+
   const serviceLabelMap = useMemo(
     () =>
       new Map(
@@ -607,25 +652,68 @@ export default function App() {
 
       <section className="grid gap-4 md:grid-cols-[1.4fr_0.9fr]">
         <Card className="overflow-hidden bg-gradient-to-br from-card via-white to-secondary/70">
-          <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-            <div className="space-y-4">
-              <Badge className="bg-primary/10 text-primary">Cogwheel Control Plane</Badge>
-              <div className="space-y-2">
-                <h1 className="font-display text-4xl font-semibold tracking-tight md:text-5xl">Quiet control, visible protection.</h1>
-                <p className="max-w-2xl text-sm text-muted-foreground md:text-base">
-                  The control plane now surfaces sources, device naming, and recent risky-query signals while the Rust backend keeps policy and rollback logic centralized.
-                </p>
+          <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+              <div className="space-y-4">
+                <Badge className={controlPlaneStatus.tone === "primary" ? "bg-primary text-primary-foreground" : controlPlaneStatus.tone === "secondary" ? "bg-secondary text-secondary-foreground" : "bg-muted text-foreground"}>
+                  {controlPlaneStatus.label}
+                </Badge>
+                <div className="space-y-2">
+                  <h1 className="font-display text-4xl font-semibold tracking-tight md:text-5xl">Quiet control, visible protection.</h1>
+                  <p className="max-w-2xl text-sm text-muted-foreground md:text-base">
+                    The control plane now surfaces sources, device naming, and recent risky-query signals while the Rust backend keeps policy and rollback logic centralized.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
+                  <RefreshCw className="mr-2 size-4" />
+                  Refresh sources
+                </Button>
+                <Button variant="ghost" onClick={() => void handleRollbackRuleset()} disabled={busyAction === "rollback-ruleset"}>
+                  <Undo2 className="mr-2 size-4" />
+                  Roll back
+                </Button>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
-                <RefreshCw className="mr-2 size-4" />
-                Refresh sources
-              </Button>
-              <Button variant="ghost" onClick={() => void handleRollbackRuleset()} disabled={busyAction === "rollback-ruleset"}>
-                <Undo2 className="mr-2 size-4" />
-                Roll back
-              </Button>
+            <div className="rounded-[28px] border border-border/70 bg-white/75 p-5">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-foreground">Control-plane status</div>
+                  <div className="max-w-2xl text-sm text-muted-foreground">{controlPlaneStatus.detail}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {controlPlaneStatus.action === "health-check" ? (
+                    <Button variant="secondary" size="sm" onClick={handleRuntimeHealthCheck} disabled={busyAction === "runtime-health-check"}>
+                      {busyAction === "runtime-health-check" ? "Checking..." : "Run health check"}
+                    </Button>
+                  ) : null}
+                  {controlPlaneStatus.action === "notifications" ? (
+                    <Button variant="secondary" size="sm" onClick={() => setAuditEventFilter("notifications")}>
+                      Review notifications
+                    </Button>
+                  ) : null}
+                  {controlPlaneStatus.action === "refresh" ? (
+                    <Button variant="secondary" size="sm" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
+                      Refresh now
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Protection state</div>
+                  <div className="mt-1 font-medium">{dashboard.protection_status}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Runtime notes</div>
+                  <div className="mt-1 font-medium">{dashboard.runtime_health.notes.length}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Delivery failures</div>
+                  <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
+                </div>
+              </div>
             </div>
           </div>
         </Card>
