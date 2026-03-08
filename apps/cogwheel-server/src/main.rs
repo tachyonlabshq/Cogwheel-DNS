@@ -571,6 +571,10 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/runtime/health", get(runtime_health))
+        .route(
+            "/api/v1/runtime/health/check",
+            post(run_runtime_health_check),
+        )
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -947,6 +951,15 @@ async fn runtime_health(
     Ok(Json(ApiEnvelope {
         data: current_runtime_health(&state),
     }))
+}
+
+async fn run_runtime_health_check(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<RuntimeHealthResponse>>, axum::http::StatusCode> {
+    active_runtime_health_check(&state)
+        .await
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn refresh_sources(
@@ -1706,6 +1719,78 @@ fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
         degraded: report.degraded,
         notes: report.notes,
     }
+}
+
+async fn active_runtime_health_check(state: &ServerState) -> Result<RuntimeHealthResponse> {
+    let before = state.dns_runtime.snapshot();
+    let current = current_runtime_health(state);
+    let probe_report = run_runtime_guard_probes(state, &before).await;
+    let after = state.dns_runtime.snapshot();
+
+    let mut notes = current.notes;
+    for note in probe_report.notes {
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    let degraded = current.degraded || probe_report.degraded;
+    let response = RuntimeHealthResponse {
+        snapshot: after,
+        degraded,
+        notes,
+    };
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: if response.degraded {
+                "runtime.health_check_degraded".to_string()
+            } else {
+                "runtime.health_check_passed".to_string()
+            },
+            payload: serde_json::to_string(&serde_json::json!({
+                "degraded": response.degraded,
+                "notes": response.notes,
+                "snapshot": response.snapshot,
+            }))?,
+            created_at: chrono::Utc::now(),
+        })
+        .await?;
+
+    if response.degraded {
+        let notification_settings = state
+            .notification_settings
+            .read()
+            .expect("notification settings lock poisoned")
+            .clone();
+        if should_deliver_notification(&notification_settings, "high") {
+            let event = NotificationWebhookEvent {
+                event_type: "runtime.health_degraded".to_string(),
+                severity: "high".to_string(),
+                title: "Runtime health degraded".to_string(),
+                summary: "A manual runtime health check detected regressions or probe failures."
+                    .to_string(),
+                domain: None,
+                device_name: None,
+                client_ip: Some("control-plane".to_string()),
+                details: response.notes.clone(),
+                created_at: chrono::Utc::now(),
+            };
+            if let Err(error) = deliver_operational_notification(
+                &state.storage,
+                &state.http_client,
+                &notification_settings,
+                event,
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to deliver runtime health notification");
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 async fn persist_service_toggle_snapshot(
