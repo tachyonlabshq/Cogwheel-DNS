@@ -1,0 +1,64 @@
+[workspace]
+members = [
+  "apps/cogwheel-desktop",
+  "apps/cogwheel-server",
+  "apps/cogwheel-web",
+  "crates/cogwheel-api",
+  "crates/cogwheel-classifier",
+  "crates/cogwheel-dns-core",
+  "crates/cogwheel-lists",
+  "crates/cogwheel-policy",
+  "crates/cogwheel-services",
+  "crates/cogwheel-storage",
+  "crates/cogwheel-sync",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["Tachyon Labs"]
+repository = "https://github.com/tachyonlabshq/Cogwheel-DNS"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+bytes = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
+futures = "0.3"
+http = "1.3"
+hickory-proto = "0.25"
+hickory-resolver = "0.25"
+humantime-serde = "1.1"
+ipnet = { version = "2.11", features = ["serde"] }
+moka = { version = "0.12", features = ["future"] }
+prometheus-client = "0.24"
+reqwest = { version = "0.12", default-features = false, features = ["charset", "gzip", "http2", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.45", features = ["full"] }
+tokio-stream = "0.1"
+toml = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.16", features = ["serde", "v4"] }
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+panic = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
