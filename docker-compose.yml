@@ -1,0 +1,20 @@
+services:
+  cogwheel-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      COGWHEEL_SERVER__HTTP_BIND_ADDR: 0.0.0.0:8080
+      COGWHEEL_SERVER__DNS_UDP_BIND_ADDR: 0.0.0.0:5353
+      COGWHEEL_SERVER__DNS_TCP_BIND_ADDR: 0.0.0.0:5353
+      COGWHEEL_STORAGE__DATABASE_URL: sqlite://data/cogwheel.db
+      COGWHEEL_UPSTREAM__SERVERS: 1.1.1.1:53,1.0.0.1:53
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/cogwheel-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

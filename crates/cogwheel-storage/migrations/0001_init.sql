@@ -1,0 +1,38 @@
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sources (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS rulesets (
+  id TEXT PRIMARY KEY,
+  hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS active_ruleset (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  ruleset_id TEXT,
+  activated_at TEXT,
+  FOREIGN KEY (ruleset_id) REFERENCES rulesets(id)
+);
+
+INSERT OR IGNORE INTO active_ruleset (slot, ruleset_id, activated_at) VALUES (1, NULL, NULL);

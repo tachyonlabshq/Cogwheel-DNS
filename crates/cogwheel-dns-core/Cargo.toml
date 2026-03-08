@@ -1,0 +1,17 @@
+[package]
+name = "cogwheel-dns-core"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+hickory-proto.workspace = true
+hickory-resolver.workspace = true
+moka.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+cogwheel-classifier = { path = "../cogwheel-classifier" }
+cogwheel-policy = { path = "../cogwheel-policy" }

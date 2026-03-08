@@ -1,0 +1,9 @@
+[package]
+name = "cogwheel-services"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+url.workspace = true
