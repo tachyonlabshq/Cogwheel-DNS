@@ -203,6 +203,7 @@ Current implementation notes:
 - Backend summaries already exist for future UI consumption: dashboard, settings, services, runtime health, rulesets, and audit events.
 - Classifier settings are already editable via backend API, so the future UI can wire directly into persisted control-plane state.
 - Blocklist source management is also API-editable, including schedule/profile/verification metadata and refresh status, so the future UI can manage blocklists without low-level database access.
+- A Vite + React + shadcn-style frontend scaffold now exists in `apps/cogwheel-web` with live dashboard/settings/service/blocklist flows wired to the current backend APIs.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
