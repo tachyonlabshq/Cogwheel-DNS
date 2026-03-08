@@ -2,7 +2,6 @@
 members = [
   "apps/cogwheel-desktop",
   "apps/cogwheel-server",
-  "apps/cogwheel-web",
   "crates/cogwheel-api",
   "crates/cogwheel-classifier",
   "crates/cogwheel-dns-core",
