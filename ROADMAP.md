@@ -197,6 +197,7 @@ Current implementation notes:
 - The device editor now previews service override domain expansion before saving and blocks no-op additions when a service cannot produce device-specific rules for the selected mode.
 - Device upsert APIs now reject invalid service override payloads with operator-readable errors, keeping custom per-device policy data consistent even outside the web editor.
 - Remote notifications now cover refresh rejections plus manual and automatic rollback events, extending webhook visibility beyond risky-domain security alerts.
+- Notification delivery history now distinguishes security alerts from control-plane events with explicit event-type and target labels in the dashboard.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 
