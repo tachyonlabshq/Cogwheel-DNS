@@ -200,7 +200,7 @@ export default function App() {
     setBusyAction("notifications-test");
     try {
       const result = await api.testNotifications();
-      pushToast("Test notification sent", `Delivered to ${result.target}.`, "success");
+      pushToast("Test notification sent", `Delivered to ${result.target} and added to recent history.`, "success");
       await load();
     } catch (mutationError) {
       pushToast("Test notification failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
