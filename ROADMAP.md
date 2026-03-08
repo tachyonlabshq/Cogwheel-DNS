@@ -131,6 +131,7 @@ Current implementation notes:
 
 - Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
 - Remaining Phase 3 gaps are richer long-window regression/SLO signals beyond the current runtime guard probes and protected-domain rollback guards, though fallback/CNAME counters and runtime health APIs are now exposed for observability.
+- Dashboard/settings summary APIs now exist to support future `shadcn/ui` control-plane flows without direct database access.
 
 Exit criteria:
 
@@ -190,6 +191,11 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 - [ ] Build the UI with `shadcn/ui` components and a tightly constrained design system for Apple-like clarity.
 - [ ] Evaluate optional Tauri packaging for native desktop distribution without moving backend logic out of Rust.
 - [ ] Add accessibility and high-clarity typography/spacing QA checklist.
+
+Current implementation notes:
+
+- Backend summaries already exist for future UI consumption: dashboard, settings, services, runtime health, rulesets, and audit events.
+- Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
 

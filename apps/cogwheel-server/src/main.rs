@@ -64,6 +64,25 @@ struct RuntimeHealthResponse {
     notes: Vec<String>,
 }
 
+#[derive(serde::Serialize)]
+struct DashboardSummary {
+    protection_status: String,
+    active_ruleset: Option<RulesetSummary>,
+    source_count: usize,
+    enabled_source_count: usize,
+    service_toggle_count: usize,
+    runtime_health: RuntimeHealthResponse,
+    latest_audit_events: Vec<AuditEvent>,
+}
+
+#[derive(serde::Serialize)]
+struct SettingsSummary {
+    blocklists: Vec<SourceRecord>,
+    services: Vec<ServiceToggleView>,
+    classifier: ClassifierSettings,
+    runtime_guard: RuntimeGuardConfig,
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeRegressionReport {
     degraded: bool,
@@ -249,6 +268,8 @@ fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
 
 fn admin_router() -> Router<ServerState> {
     Router::new()
+        .route("/api/v1/dashboard", get(dashboard_summary))
+        .route("/api/v1/settings", get(settings_summary))
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
@@ -269,6 +290,81 @@ async fn list_sources(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn dashboard_summary(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<DashboardSummary>>, axum::http::StatusCode> {
+    let sources = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rulesets = state
+        .storage
+        .list_rulesets()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let active_ruleset = rulesets
+        .iter()
+        .find(|row| row.status == "active")
+        .map(|row| RulesetSummary {
+            id: row.id,
+            hash: row.hash.clone(),
+            status: row.status.clone(),
+            created_at: row.created_at,
+        });
+    let runtime_health = current_runtime_health(&state);
+    let latest_audit_events = state
+        .storage
+        .recent_audit_events(5)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot = load_service_toggle_snapshot(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: DashboardSummary {
+            protection_status: if runtime_health.degraded {
+                "Needs Attention".to_string()
+            } else {
+                "Protected".to_string()
+            },
+            active_ruleset,
+            source_count: sources.len(),
+            enabled_source_count: sources.iter().filter(|source| source.enabled).count(),
+            service_toggle_count: snapshot
+                .toggles
+                .iter()
+                .filter(|toggle| !matches!(toggle.mode, ServiceToggleMode::Inherit))
+                .count(),
+            runtime_health,
+            latest_audit_events,
+        },
+    }))
+}
+
+async fn settings_summary(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<SettingsSummary>>, axum::http::StatusCode> {
+    let blocklists = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let services = build_service_toggle_views(&state)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: SettingsSummary {
+            blocklists,
+            services,
+            classifier: ClassifierSettings::default(),
+            runtime_guard: state.runtime_guard.clone(),
+        },
+    }))
 }
 
 async fn list_rulesets(
@@ -356,25 +452,8 @@ async fn runtime_snapshot(
 async fn runtime_health(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<RuntimeHealthResponse>>, axum::http::StatusCode> {
-    let snapshot = state.dns_runtime.snapshot();
-    let report = evaluate_runtime_regressions(
-        &DnsRuntimeSnapshot {
-            upstream_failures_total: 0,
-            fallback_served_total: 0,
-            cache_hits_total: 0,
-            cname_uncloaks_total: 0,
-            cname_blocks_total: 0,
-        },
-        &snapshot,
-        &state.runtime_guard,
-    );
-
     Ok(Json(ApiEnvelope {
-        data: RuntimeHealthResponse {
-            snapshot,
-            degraded: report.degraded,
-            notes: report.notes,
-        },
+        data: current_runtime_health(&state),
     }))
 }
 
@@ -390,20 +469,10 @@ async fn refresh_sources(
 async fn list_services(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<Vec<ServiceToggleView>>>, axum::http::StatusCode> {
-    let manifests = built_in_service_manifests();
-    let snapshot = load_service_toggle_snapshot(&state.storage)
+    build_service_toggle_views(&state)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: manifests
-            .into_iter()
-            .map(|manifest| ServiceToggleView {
-                mode: snapshot.mode_for(&manifest.service_id),
-                manifest,
-            })
-            .collect(),
-    }))
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn update_service_toggle(
@@ -604,6 +673,40 @@ async fn load_service_toggle_snapshot(storage: &Storage) -> Result<ServiceToggle
         return Ok(ServiceToggleSnapshot::default());
     };
     Ok(ServiceToggleSnapshot::from_json(&value).unwrap_or_default())
+}
+
+async fn build_service_toggle_views(state: &ServerState) -> Result<Vec<ServiceToggleView>> {
+    let manifests = built_in_service_manifests();
+    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
+
+    Ok(manifests
+        .into_iter()
+        .map(|manifest| ServiceToggleView {
+            mode: snapshot.mode_for(&manifest.service_id),
+            manifest,
+        })
+        .collect())
+}
+
+fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
+    let snapshot = state.dns_runtime.snapshot();
+    let report = evaluate_runtime_regressions(
+        &DnsRuntimeSnapshot {
+            upstream_failures_total: 0,
+            fallback_served_total: 0,
+            cache_hits_total: 0,
+            cname_uncloaks_total: 0,
+            cname_blocks_total: 0,
+        },
+        &snapshot,
+        &state.runtime_guard,
+    );
+
+    RuntimeHealthResponse {
+        snapshot,
+        degraded: report.degraded,
+        notes: report.notes,
+    }
 }
 
 async fn persist_service_toggle_snapshot(
