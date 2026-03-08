@@ -178,6 +178,7 @@ Current implementation notes:
 - The DNS data plane now selects per-device policy catalogs in memory, scopes cache entries by effective policy, and records risky events from live query traffic with device attribution when a named device is known.
 - The dashboard now surfaces alert severity rollups and top affected devices, and high-severity detections emit internal audit alerts as a first notification hook.
 - External webhook delivery can now be configured from the control plane with a minimum severity threshold, using persisted notification settings and outbound alert delivery from the server.
+- Webhook delivery now retries with backoff and records explicit delivery success/failure audit events for operator visibility.
 - Runtime startup now attempts to warm the profile policy catalog from persisted sources, and rollback rebuilds profile policies while restoring the selected global artifact.
 - Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
 
