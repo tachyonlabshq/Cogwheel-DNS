@@ -62,6 +62,7 @@ export type DeviceRecord = {
   policy_mode: "global" | "custom";
   blocklist_profile_override: string | null;
   protection_override: "inherit" | "bypass";
+  allowed_domains: string[];
 };
 
 export type SecurityEventRecord = {
@@ -189,6 +190,7 @@ export const api = {
     policy_mode?: DeviceRecord["policy_mode"];
     blocklist_profile_override?: string | null;
     protection_override?: DeviceRecord["protection_override"];
+    allowed_domains?: string[];
   }) =>
     fetchJson<DeviceRecord>("/api/v1/devices", {
       method: "POST",

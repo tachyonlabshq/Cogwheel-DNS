@@ -55,6 +55,7 @@ pub struct DevicePolicyConfig {
     pub policy_mode: String,
     pub blocklist_profile_override: Option<String>,
     pub protection_override: String,
+    pub allowed_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +259,7 @@ impl DnsRuntime {
             }
         }
 
-        let (engine, cache_scope) = self.policy_for_client(client_addr);
+        let (engine, cache_scope) = self.policy_for_client(client_addr, &domain);
         let cache_key = policy_cache_key(&cache_scope, &domain);
 
         if let Some(cached) = self.cache.get(&cache_key).await {
@@ -347,7 +348,11 @@ impl DnsRuntime {
         }
     }
 
-    fn policy_for_client(&self, client_addr: Option<SocketAddr>) -> (Arc<PolicyEngine>, String) {
+    fn policy_for_client(
+        &self,
+        client_addr: Option<SocketAddr>,
+        domain: &str,
+    ) -> (Arc<PolicyEngine>, String) {
         let global = self.policy.read().expect("policy lock poisoned").clone();
         let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
             return (global.clone(), global.artifact().hash.clone());
@@ -362,6 +367,18 @@ impl DnsRuntime {
         };
         if device.policy_mode != "custom" {
             return (global.clone(), global.artifact().hash.clone());
+        }
+        if device
+            .allowed_domains
+            .iter()
+            .any(|candidate| domain_matches_override(domain, candidate))
+        {
+            let allow_all_policy = self
+                .allow_all_policy
+                .read()
+                .expect("allow-all policy lock poisoned")
+                .clone();
+            return (allow_all_policy, format!("device-allow:{}", client_ip));
         }
         if device.protection_override == "bypass" {
             let allow_all_policy = self
@@ -472,6 +489,13 @@ fn build_allow_all_policy(global_policy: &Arc<PolicyEngine>) -> Arc<PolicyEngine
         artifact.protected_domains.clone(),
         artifact.block_mode.clone(),
     )))
+}
+
+fn domain_matches_override(domain: &str, candidate: &str) -> bool {
+    domain == candidate
+        || domain
+            .strip_suffix(candidate)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
@@ -663,5 +687,12 @@ mod tests {
             allow_all.evaluate("ads.example").kind,
             DecisionKind::Allowed
         ));
+    }
+
+    #[test]
+    fn domain_matches_override_supports_suffixes() {
+        assert!(domain_matches_override("ads.example.com", "example.com"));
+        assert!(domain_matches_override("example.com", "example.com"));
+        assert!(!domain_matches_override("badexample.com", "example.com"));
     }
 }

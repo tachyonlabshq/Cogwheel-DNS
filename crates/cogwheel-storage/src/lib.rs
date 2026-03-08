@@ -13,6 +13,7 @@ const MIGRATION_0003: &str = include_str!("../migrations/0003_source_metadata.sq
 const MIGRATION_0004: &str = include_str!("../migrations/0004_source_verification_strictness.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_devices_security_events.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_device_protection_override.sql");
+const MIGRATION_0007: &str = include_str!("../migrations/0007_device_allowed_domains.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -68,6 +69,7 @@ pub struct DeviceRecord {
     pub policy_mode: String,
     pub blocklist_profile_override: Option<String>,
     pub protection_override: String,
+    pub allowed_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,8 +178,8 @@ impl Storage {
     pub async fn upsert_device(&self, device: &DeviceRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(
-            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             params![
                 device.id.to_string(),
                 device.name,
@@ -185,6 +187,7 @@ impl Storage {
                 device.policy_mode,
                 device.blocklist_profile_override,
                 device.protection_override,
+                serde_json::to_string(&device.allowed_domains)?,
             ],
         )?;
         Ok(())
@@ -193,7 +196,7 @@ impl Storage {
     pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override FROM devices ORDER BY name ASC",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json FROM devices ORDER BY name ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(DeviceRecord {
@@ -203,6 +206,8 @@ impl Storage {
                 policy_mode: row.get(3)?,
                 blocklist_profile_override: row.get(4)?,
                 protection_override: row.get(5)?,
+                allowed_domains: serde_json::from_str(&row.get::<_, String>(6)?)
+                    .unwrap_or_default(),
             })
         })?;
 
@@ -216,7 +221,7 @@ impl Storage {
     ) -> Result<Option<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override FROM devices WHERE ip_address = ?1",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json FROM devices WHERE ip_address = ?1",
         )?;
 
         statement
@@ -228,6 +233,8 @@ impl Storage {
                     policy_mode: row.get(3)?,
                     blocklist_profile_override: row.get(4)?,
                     protection_override: row.get(5)?,
+                    allowed_domains: serde_json::from_str(&row.get::<_, String>(6)?)
+                        .unwrap_or_default(),
                 })
             })
             .optional()
@@ -406,6 +413,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0004);
     let _ = connection.execute_batch(MIGRATION_0005);
     let _ = connection.execute_batch(MIGRATION_0006);
+    let _ = connection.execute_batch(MIGRATION_0007);
     Ok(())
 }
 

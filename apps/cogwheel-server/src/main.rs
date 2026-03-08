@@ -234,6 +234,7 @@ struct UpsertDeviceRequest {
     policy_mode: Option<String>,
     blocklist_profile_override: Option<String>,
     protection_override: Option<String>,
+    allowed_domains: Option<Vec<String>>,
 }
 
 #[tokio::main]
@@ -521,6 +522,9 @@ async fn upsert_device(
             request.protection_override.as_deref().unwrap_or("inherit"),
         )
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+        allowed_domains: normalize_device_allowed_domains(
+            request.allowed_domains.unwrap_or_default(),
+        ),
     };
 
     state
@@ -1613,12 +1617,18 @@ fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<Devic
             } else {
                 "inherit".to_string()
             };
+            let allowed_domains = if policy_mode == "custom" {
+                normalize_device_allowed_domains(device.allowed_domains)
+            } else {
+                Vec::new()
+            };
 
             DevicePolicyConfig {
                 ip_address: device.ip_address,
                 policy_mode,
                 blocklist_profile_override,
                 protection_override,
+                allowed_domains,
             }
         })
         .collect()
@@ -1669,6 +1679,23 @@ fn normalize_device_protection_override(mode: &str) -> Option<String> {
         "inherit" | "bypass" => Some(normalized),
         _ => None,
     }
+}
+
+fn normalize_device_allowed_domains(domains: Vec<String>) -> Vec<String> {
+    let mut normalized = domains
+        .into_iter()
+        .filter_map(|domain| {
+            let trimmed = domain.trim().trim_matches('.').to_ascii_lowercase();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn severity_for_classifier_score(score: f32) -> &'static str {
@@ -2075,6 +2102,19 @@ mod tests {
     }
 
     #[test]
+    fn normalize_device_allowed_domains_deduplicates_values() {
+        assert_eq!(
+            normalize_device_allowed_domains(vec![
+                " Example.com ".to_string(),
+                "example.com".to_string(),
+                "cdn.example.com.".to_string(),
+                " ".to_string(),
+            ]),
+            vec!["cdn.example.com".to_string(), "example.com".to_string()]
+        );
+    }
+
+    #[test]
     fn normalize_profile_name_accepts_non_empty_values() {
         assert_eq!(
             normalize_profile_name(" Balanced "),
@@ -2125,12 +2165,14 @@ mod tests {
             policy_mode: "global".to_string(),
             blocklist_profile_override: Some("Aggressive".to_string()),
             protection_override: "bypass".to_string(),
+            allowed_domains: vec!["example.com".to_string()],
         }]);
 
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].policy_mode, "global");
         assert_eq!(configs[0].blocklist_profile_override, None);
         assert_eq!(configs[0].protection_override, "inherit");
+        assert!(configs[0].allowed_domains.is_empty());
     }
 
     #[test]
