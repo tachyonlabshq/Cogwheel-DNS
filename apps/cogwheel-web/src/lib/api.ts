@@ -225,6 +225,10 @@ export const api = {
         method: "POST",
       },
     ),
+  runtimeHealthCheck: () =>
+    fetchJson<RuntimeHealth>("/api/v1/runtime/health/check", {
+      method: "POST",
+    }),
   updateClassifier: (mode: SettingsSummary["classifier"]["mode"], threshold: number) =>
     fetchJson<SettingsSummary["classifier"]>("/api/v1/settings/classifier", {
       method: "POST",

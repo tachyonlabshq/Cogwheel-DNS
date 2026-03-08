@@ -198,6 +198,7 @@ Current implementation notes:
 - Device upsert APIs now reject invalid service override payloads with operator-readable errors, keeping custom per-device policy data consistent even outside the web editor.
 - Remote notifications now cover refresh rejections plus manual and automatic rollback events, extending webhook visibility beyond risky-domain security alerts.
 - Notification delivery history now distinguishes security alerts from control-plane events with explicit event-type and target labels in the dashboard.
+- Operators can now trigger an active runtime health check from the control plane, recording pass/fail audit events and sending a webhook notification when the runtime is degraded.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 

@@ -380,6 +380,23 @@ export default function App() {
     }
   }
 
+  async function handleRuntimeHealthCheck() {
+    setBusyAction("runtime-health-check");
+    try {
+      const report = await api.runtimeHealthCheck();
+      pushToast(
+        report.degraded ? "Runtime degraded" : "Runtime healthy",
+        report.notes[0] ?? "Runtime guard probes completed without regressions.",
+        report.degraded ? "error" : "success",
+      );
+      await load();
+    } catch (mutationError) {
+      pushToast("Runtime health check failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleServiceUpdate(serviceId: string, mode: "Inherit" | "Allow" | "Block") {
     setBusyAction(`service-${serviceId}`);
     try {
@@ -1199,7 +1216,12 @@ export default function App() {
             <Separator />
 
             <section className="space-y-3">
-              <div className="font-medium">Runtime notes</div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-medium">Runtime notes</div>
+                <Button variant="ghost" size="sm" onClick={handleRuntimeHealthCheck} disabled={busyAction === "runtime-health-check"}>
+                  {busyAction === "runtime-health-check" ? "Checking..." : "Run health check"}
+                </Button>
+              </div>
               <div className="grid gap-3">
                 {dashboard.runtime_health.notes.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
