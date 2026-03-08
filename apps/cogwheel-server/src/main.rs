@@ -960,9 +960,14 @@ async fn test_notification_settings(
         created_at: chrono::Utc::now(),
     };
 
-    send_security_notification(&state.http_client, &settings, &test_event)
-        .await
-        .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    deliver_security_notification(
+        state.storage.as_ref(),
+        &state.http_client,
+        &settings,
+        &test_event,
+    )
+    .await
+    .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
     state
         .storage
         .record_audit_event(&AuditEvent {
