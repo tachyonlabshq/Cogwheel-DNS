@@ -245,6 +245,7 @@ Current implementation notes:
 - A Vite + React + shadcn-style frontend scaffold now exists in `apps/cogwheel-web` with live dashboard/settings/service/blocklist flows wired to the current backend APIs.
 - The current UI already supports classifier editing, blocklist lifecycle and metadata editing, and searchable service toggles; remaining work is polish, onboarding, recovery UX, and local-first behavior.
 - The operator feed now supports quick runtime/notification/device/ruleset filtering, making the current dashboard easier to triage while broader Phase 5 simplification work remains open.
+- The home dashboard now calls out a single control-plane state (`Protected`, `Updating`, or `Needs attention`) and suggests the next recovery action inline so operators can react without scanning every panel.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
