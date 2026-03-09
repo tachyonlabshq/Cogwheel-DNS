@@ -232,7 +232,7 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 - [x] Add optional `Services` view for curated allow/block toggles without exposing raw DNS complexity.
 - [x] Add one-click safe actions: `Pause 10m`, `Rollback`, `Trust Domain`.
 - [x] Add guided issue recovery flows (no jargon, plain language).
-- [ ] Implement local-first UX: app remains useful during temporary server disconnects.
+- [x] Implement local-first UX: app remains useful during temporary server disconnects.
 - [x] Build the UI with `shadcn/ui` components and a tightly constrained design system for Apple-like clarity.
 - [ ] Evaluate optional Tauri packaging for native desktop distribution without moving backend logic out of Rust.
 - [ ] Add accessibility and high-clarity typography/spacing QA checklist.
@@ -249,6 +249,7 @@ Current implementation notes:
 - The home view now includes direct jump links into overview, recovery, settings, blocklists, and device sections so the dashboard acts as a true single-home control surface.
 - A one-click "Pause 10m" action on the dashboard now globally bypasses all DNS blocking policies for temporary troubleshooting.
 - The onboarding wizard is now integrated directly into the dashboard as a "Setup checklist", avoiding an intrusive modal flow while maintaining clear first-run goals.
+- Local-first UX caching is now implemented, persisting dashboard and settings states to `localStorage` so the UI remains fully rendered and useful even if the control plane drops offline briefly.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
