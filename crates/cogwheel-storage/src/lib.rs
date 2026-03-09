@@ -322,6 +322,15 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn delete_device(&self, device_id: Uuid) -> Result<bool, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let changed = connection.execute(
+            "DELETE FROM devices WHERE id = ?1",
+            params![device_id.to_string()],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
