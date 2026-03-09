@@ -89,6 +89,7 @@ export default function App() {
   const [notificationHistoryWindow, setNotificationHistoryWindow] = useState<10 | 30 | 50 | 100>(10);
   const [serviceSearch, setServiceSearch] = useState("");
   const [auditEventFilter, setAuditEventFilter] = useState<"all" | "runtime" | "notifications" | "devices" | "rulesets">("all");
+  const [notificationDeliveryFilter, setNotificationDeliveryFilter] = useState<"all" | "failed" | "security" | "control-plane">("all");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState("");
@@ -191,6 +192,17 @@ export default function App() {
       return true;
     }),
     [auditEventFilter, dashboard.latest_audit_events],
+  );
+
+  const filteredNotificationDeliveries = useMemo(
+    () => dashboard.recent_notification_deliveries.filter((delivery) => {
+      if (notificationDeliveryFilter === "all") return true;
+      if (notificationDeliveryFilter === "failed") return delivery.status === "failed";
+      if (notificationDeliveryFilter === "security") return delivery.event_type.startsWith("security.");
+      if (notificationDeliveryFilter === "control-plane") return !delivery.event_type.startsWith("security.");
+      return true;
+    }),
+    [dashboard.recent_notification_deliveries, notificationDeliveryFilter],
   );
 
   const controlPlaneStatus = useMemo(() => {
@@ -1097,15 +1109,29 @@ export default function App() {
                 </div>
               </div>
               <div className="space-y-2">
-                <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      ["all", "All"],
+                      ["failed", "Failed"],
+                      ["security", "Security"],
+                      ["control-plane", "Control plane"],
+                    ].map(([value, label]) => (
+                      <Button key={value} variant={notificationDeliveryFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setNotificationDeliveryFilter(value as "all" | "failed" | "security" | "control-plane")}>
+                        {label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
               </div>
               <div className="grid gap-3">
-                {dashboard.recent_notification_deliveries.length === 0 ? (
+                {filteredNotificationDeliveries.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                    No recent notification deliveries recorded in the selected history window.
+                    No recent notification deliveries match the selected history filter.
                   </div>
                 ) : (
-                  dashboard.recent_notification_deliveries.map((delivery) => (
+                  filteredNotificationDeliveries.map((delivery) => (
                     <div key={`${delivery.created_at}-${delivery.title}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
                       <div className="flex items-center justify-between gap-3">
                         <div>
