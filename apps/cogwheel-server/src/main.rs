@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use axum::extract::{FromRef, Query, State};
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
@@ -616,6 +617,8 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/runtime/resume", post(resume_runtime))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
+        .route("/api/v1/sync/transport", get(sync_transport))
+        .route("/api/v1/sync/transport", post(update_sync_transport))
         .route("/api/v1/sync/export", get(export_sync_state))
         .route("/api/v1/sync/import", post(import_sync_state))
         .route("/api/v1/rulesets", get(list_rulesets))
@@ -899,6 +902,30 @@ struct UpdateSyncProfileRequest {
     profile: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncTransportView {
+    mode: String,
+    token_configured: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpdateSyncTransportRequest {
+    mode: String,
+    token: Option<String>,
+}
+
+fn normalize_sync_transport_mode(raw: Option<&str>) -> String {
+    match raw
+        .unwrap_or("opportunistic")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "https-required" => "https-required".to_string(),
+        _ => "opportunistic".to_string(),
+    }
+}
+
 fn normalize_sync_profile(raw: Option<&str>) -> SyncProfile {
     match raw.unwrap_or("full").trim().to_ascii_lowercase().as_str() {
         "settings-only" => SyncProfile::SettingsOnly,
@@ -927,9 +954,72 @@ async fn persist_sync_profile(storage: &Storage, profile: &SyncProfile) -> Resul
     Ok(())
 }
 
+async fn load_sync_transport_mode(storage: &Storage) -> Result<String> {
+    let raw = storage.get_setting("sync_transport_mode").await?;
+    Ok(normalize_sync_transport_mode(raw.as_deref()))
+}
+
+async fn persist_sync_transport_mode(storage: &Storage, mode: &str) -> Result<()> {
+    storage.upsert_setting("sync_transport_mode", mode).await?;
+    Ok(())
+}
+
+async fn load_sync_transport_token(storage: &Storage) -> Result<Option<String>> {
+    storage
+        .get_setting("sync_transport_token")
+        .await
+        .map_err(Into::into)
+}
+
+async fn persist_sync_transport_token(storage: &Storage, token: Option<&str>) -> Result<()> {
+    storage
+        .upsert_setting("sync_transport_token", token.unwrap_or(""))
+        .await?;
+    Ok(())
+}
+
+async fn enforce_sync_transport_policy(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<(), axum::http::StatusCode> {
+    let mode = load_sync_transport_mode(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if mode == "https-required" {
+        let forwarded_proto = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if forwarded_proto != "https" {
+            return Err(axum::http::StatusCode::FORBIDDEN);
+        }
+    }
+
+    let token = load_sync_transport_token(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(expected_token) = token.filter(|t| !t.is_empty()) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let Some(bearer) = auth.strip_prefix("Bearer ") else {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        };
+        if bearer != expected_token {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(())
+}
+
 async fn sync_profile(
     State(state): State<ServerState>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
     let profile = load_sync_profile(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -942,8 +1032,10 @@ async fn sync_profile(
 
 async fn update_sync_profile(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(request): Json<UpdateSyncProfileRequest>,
 ) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
     let profile = normalize_sync_profile(Some(&request.profile));
     persist_sync_profile(&state.storage, &profile)
         .await
@@ -951,6 +1043,51 @@ async fn update_sync_profile(
     Ok(Json(ApiEnvelope {
         data: SyncProfileView {
             profile: profile.as_str().to_string(),
+        },
+    }))
+}
+
+async fn sync_transport(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<SyncTransportView>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
+    let mode = load_sync_transport_mode(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let token = load_sync_transport_token(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: SyncTransportView {
+            mode,
+            token_configured: token.is_some_and(|value| !value.is_empty()),
+        },
+    }))
+}
+
+async fn update_sync_transport(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateSyncTransportRequest>,
+) -> Result<Json<ApiEnvelope<SyncTransportView>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
+    let mode = normalize_sync_transport_mode(Some(&request.mode));
+    persist_sync_transport_mode(&state.storage, &mode)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let token = request.token.as_deref().map(str::trim);
+    let token = token.filter(|value| !value.is_empty());
+    persist_sync_transport_token(&state.storage, token)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: SyncTransportView {
+            mode,
+            token_configured: token.is_some(),
         },
     }))
 }
@@ -999,7 +1136,9 @@ fn register_sync_nonce(state: &ServerState, envelope: &SyncEnvelope) -> bool {
 async fn export_sync_state(
     State(state): State<ServerState>,
     Query(query): Query<SyncExportQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<SyncEnvelope>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
     let profile = if query.profile.is_some() {
         normalize_sync_profile(query.profile.as_deref())
     } else {
@@ -1060,8 +1199,10 @@ async fn export_sync_state(
 
 async fn import_sync_state(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(request): Json<ImportSyncEnvelopeRequest>,
 ) -> Result<Json<ApiEnvelope<SyncImportResult>>, axum::http::StatusCode> {
+    enforce_sync_transport_policy(&state, &headers).await?;
     let payload_bytes = Storage::verify_sync_envelope(&request.envelope)
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
     let payload: SyncStatePayloadV1 =
