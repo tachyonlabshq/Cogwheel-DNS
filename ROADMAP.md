@@ -271,7 +271,7 @@ Implementation notes:
 - [x] Sync only required state: blocklists, classifier config, allowlist/denylist overrides, versioned settings.
 - [x] Add deterministic conflict resolution (`revision + vector clock` or server-authoritative mode).
 - [x] Add selective replication profiles (`full`, `settings-only`, `read-only follower`).
-- [ ] Add encrypted transport and replay protection.
+- [x] Add encrypted transport and replay protection.
 - [ ] Add health/status view in GUI for each node.
 
 Exit criteria:
