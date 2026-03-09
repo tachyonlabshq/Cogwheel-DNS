@@ -169,6 +169,24 @@ export type DashboardSummary = {
   security_summary: SecuritySummary;
 };
 
+export type SyncPeerStatus = {
+  node_public_key: string;
+  imports: number;
+  last_import_at: string;
+  last_revision: number;
+  profile: string;
+};
+
+export type SyncNodeStatus = {
+  local_node_public_key: string;
+  profile: string;
+  revision: number;
+  transport_mode: string;
+  transport_token_configured: boolean;
+  replay_cache_entries: number;
+  peers: SyncPeerStatus[];
+};
+
 export type SettingsSummary = {
   blocklists: SourceRecord[];
   blocklist_statuses: BlocklistStatus[];
@@ -215,6 +233,7 @@ export const api = {
     return fetchJson<DashboardSummary>(query ? `/api/v1/dashboard?${query}` : "/api/v1/dashboard");
   },
   settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
+  syncStatus: () => fetchJson<SyncNodeStatus>("/api/v1/sync/status"),
   refreshSources: () =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {
       method: "POST",
