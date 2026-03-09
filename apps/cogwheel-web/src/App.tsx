@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type DashboardSummary, type SettingsSummary } from "@/lib/api";
+import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -61,9 +61,20 @@ const emptySettings: SettingsSummary = {
   runtime_guard: { probe_domains: [], max_upstream_failures_delta: 0, max_fallback_served_delta: 0 },
 };
 
+const emptySyncStatus: SyncNodeStatus = {
+  local_node_public_key: "",
+  profile: "full",
+  revision: 0,
+  transport_mode: "opportunistic",
+  transport_token_configured: false,
+  replay_cache_entries: 0,
+  peers: [],
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
+  const [syncStatus, setSyncStatus] = useState<SyncNodeStatus>(emptySyncStatus);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -110,23 +121,28 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
+        api.syncStatus(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
+      localStorage.setItem("cogwheel_sync_status_cache", JSON.stringify(syncStatusData));
       setDashboard(dashboardData);
       setSettings(settingsData);
+      setSyncStatus(syncStatusData);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
       const cachedSettings = localStorage.getItem("cogwheel_settings_cache");
+      const cachedSyncStatus = localStorage.getItem("cogwheel_sync_status_cache");
 
-      if (cachedDashboard && cachedSettings) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
+          setSyncStatus(JSON.parse(cachedSyncStatus) as SyncNodeStatus);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -954,6 +970,26 @@ export default function App() {
                 {label}
               </Button>
             ))}
+          </div>
+          <div className="mt-5 rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+            <div className="font-medium">Node sync status</div>
+            <div className="mt-2 grid gap-2 text-muted-foreground">
+              <div>Profile: <span className="font-medium text-foreground">{syncStatus.profile}</span></div>
+              <div>Revision: <span className="font-medium text-foreground">{syncStatus.revision}</span></div>
+              <div>Transport: <span className="font-medium text-foreground">{syncStatus.transport_mode}{syncStatus.transport_token_configured ? " + token" : ""}</span></div>
+              <div>Replay cache entries: <span className="font-medium text-foreground">{syncStatus.replay_cache_entries}</span></div>
+              <div>Known peers: <span className="font-medium text-foreground">{syncStatus.peers.length}</span></div>
+            </div>
+            {syncStatus.peers.length > 0 ? (
+              <div className="mt-3 grid gap-2">
+                {syncStatus.peers.slice(0, 3).map((peer) => (
+                  <div key={peer.node_public_key} className="rounded-xl border border-border/70 bg-white/80 px-3 py-2 text-xs text-muted-foreground">
+                    <div className="font-medium text-foreground">{peer.node_public_key.slice(0, 12)}...</div>
+                    <div>Revision {peer.last_revision} via {peer.profile}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </Card>
       </section>

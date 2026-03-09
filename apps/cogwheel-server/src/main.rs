@@ -615,6 +615,7 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route("/api/v1/sync/status", get(sync_status))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
         .route("/api/v1/sync/transport", get(sync_transport))
@@ -908,6 +909,26 @@ struct SyncTransportView {
     token_configured: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncPeerStatusView {
+    node_public_key: String,
+    imports: usize,
+    last_import_at: chrono::DateTime<chrono::Utc>,
+    last_revision: u64,
+    profile: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncNodeStatusView {
+    local_node_public_key: String,
+    profile: String,
+    revision: u64,
+    transport_mode: String,
+    transport_token_configured: bool,
+    replay_cache_entries: usize,
+    peers: Vec<SyncPeerStatusView>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct UpdateSyncTransportRequest {
     mode: String,
@@ -1088,6 +1109,92 @@ async fn update_sync_transport(
         data: SyncTransportView {
             mode,
             token_configured: token.is_some(),
+        },
+    }))
+}
+
+async fn sync_status(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<SyncNodeStatusView>>, axum::http::StatusCode> {
+    let profile = load_sync_profile(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let revision = load_sync_revision(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let transport_mode = load_sync_transport_mode(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let transport_token = load_sync_transport_token(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let replay_cache_entries = state
+        .sync_seen_nonces
+        .lock()
+        .expect("sync nonce lock poisoned")
+        .len();
+
+    let events = state
+        .storage
+        .recent_audit_events(200)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut peers = HashMap::<String, SyncPeerStatusView>::new();
+    for event in events {
+        if event.event_type != "sync.state_imported" {
+            continue;
+        }
+        let payload: serde_json::Value = match serde_json::from_str(&event.payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let from = match payload.get("from").and_then(serde_json::Value::as_str) {
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        let revision = payload
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let profile = payload
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("full")
+            .to_string();
+
+        let entry = peers.entry(from.clone()).or_insert(SyncPeerStatusView {
+            node_public_key: from,
+            imports: 0,
+            last_import_at: event.created_at,
+            last_revision: revision,
+            profile,
+        });
+        entry.imports += 1;
+        if event.created_at > entry.last_import_at {
+            entry.last_import_at = event.created_at;
+            entry.last_revision = revision;
+            entry.profile = payload
+                .get("profile")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("full")
+                .to_string();
+        }
+    }
+
+    let mut peers: Vec<SyncPeerStatusView> = peers.into_values().collect();
+    peers.sort_by(|a, b| b.last_import_at.cmp(&a.last_import_at));
+
+    Ok(Json(ApiEnvelope {
+        data: SyncNodeStatusView {
+            local_node_public_key: state.storage.identity().public_b64.clone(),
+            profile: profile.as_str().to_string(),
+            revision,
+            transport_mode,
+            transport_token_configured: transport_token.is_some_and(|v| !v.is_empty()),
+            replay_cache_entries,
+            peers,
         },
     }))
 }
