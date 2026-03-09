@@ -32,6 +32,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
+use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::time::interval;
@@ -615,6 +616,7 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route("/api/v1/tailscale/status", get(tailscale_status))
         .route("/api/v1/sync/status", get(sync_status))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
@@ -877,6 +879,143 @@ async fn settings_summary(
             notification_test_presets,
             runtime_guard: state.runtime_guard.clone(),
         },
+    }))
+}
+
+fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            return TailscaleStatusView {
+                installed: true,
+                daemon_running: false,
+                backend_state: None,
+                hostname: None,
+                tailnet_name: None,
+                peer_count: 0,
+                exit_node_active: false,
+                version: None,
+                health_warnings: vec![],
+                last_error: Some(format!("invalid tailscale json: {error}")),
+            };
+        }
+    };
+
+    let backend_state = value
+        .get("BackendState")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let hostname = value
+        .get("Self")
+        .and_then(|self_value| self_value.get("HostName"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let tailnet_name = value
+        .get("CurrentTailnet")
+        .and_then(|tailnet| tailnet.get("Name"))
+        .or_else(|| value.get("MagicDNSSuffix"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let peer_count = value
+        .get("Peer")
+        .and_then(serde_json::Value::as_object)
+        .map(|peers| peers.len())
+        .unwrap_or(0);
+    let exit_node_active = value
+        .get("Self")
+        .and_then(|self_value| {
+            self_value
+                .get("ExitNodeStatus")
+                .or_else(|| self_value.get("ExitNode"))
+                .or_else(|| self_value.get("UsingExitNode"))
+        })
+        .map(|value| {
+            value.as_bool().unwrap_or_else(|| {
+                value
+                    .as_object()
+                    .map(|object| !object.is_empty())
+                    .unwrap_or_else(|| value.as_str().is_some_and(|s| !s.is_empty()))
+            })
+        })
+        .unwrap_or(false);
+    let health_warnings = value
+        .get("Health")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    TailscaleStatusView {
+        installed: true,
+        daemon_running: backend_state.as_deref() != Some("Stopped"),
+        backend_state,
+        hostname,
+        tailnet_name,
+        peer_count,
+        exit_node_active,
+        version: None,
+        health_warnings,
+        last_error: None,
+    }
+}
+
+fn load_tailscale_status() -> TailscaleStatusView {
+    match Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let mut status = parse_tailscale_status_json(&String::from_utf8_lossy(&output.stdout));
+            if let Ok(version_output) = Command::new("tailscale").arg("version").output() {
+                if version_output.status.success() {
+                    status.version = Some(
+                        String::from_utf8_lossy(&version_output.stdout)
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                    );
+                }
+            }
+            status
+        }
+        Ok(output) => TailscaleStatusView {
+            installed: true,
+            daemon_running: false,
+            backend_state: None,
+            hostname: None,
+            tailnet_name: None,
+            peer_count: 0,
+            exit_node_active: false,
+            version: None,
+            health_warnings: vec![],
+            last_error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        },
+        Err(error) => TailscaleStatusView {
+            installed: false,
+            daemon_running: false,
+            backend_state: None,
+            hostname: None,
+            tailnet_name: None,
+            peer_count: 0,
+            exit_node_active: false,
+            version: None,
+            health_warnings: vec![],
+            last_error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn tailscale_status(
+    State(_state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<TailscaleStatusView>>, axum::http::StatusCode> {
+    Ok(Json(ApiEnvelope {
+        data: load_tailscale_status(),
     }))
 }
 
@@ -4074,6 +4213,35 @@ mod tests {
         assert_eq!(analytics.top_failed_domains.len(), 1);
         assert_eq!(analytics.top_failed_domains[0].domain, "fail.example");
         assert_eq!(analytics.top_failed_domains[0].failure_count, 2);
+    }
+
+    #[test]
+    fn parse_tailscale_status_json_extracts_health_fields() {
+        let status = parse_tailscale_status_json(
+            &serde_json::json!({
+                "BackendState": "Running",
+                "CurrentTailnet": { "Name": "example.ts.net" },
+                "Self": {
+                    "HostName": "cogwheel-node",
+                    "UsingExitNode": true
+                },
+                "Peer": {
+                    "peer-a": {},
+                    "peer-b": {}
+                },
+                "Health": ["wantrunning is false"]
+            })
+            .to_string(),
+        );
+
+        assert!(status.installed);
+        assert!(status.daemon_running);
+        assert_eq!(status.backend_state.as_deref(), Some("Running"));
+        assert_eq!(status.hostname.as_deref(), Some("cogwheel-node"));
+        assert_eq!(status.tailnet_name.as_deref(), Some("example.ts.net"));
+        assert_eq!(status.peer_count, 2);
+        assert!(status.exit_node_active);
+        assert_eq!(status.health_warnings, vec!["wantrunning is false"]);
     }
 
     #[test]
