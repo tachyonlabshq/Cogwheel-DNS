@@ -18,7 +18,7 @@ use cogwheel_services::{
 };
 use cogwheel_storage::{
     AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, NotificationDeliveryRecord,
-    RulesetRecord, SecurityEventRecord, SourceRecord, Storage,
+    RulesetRecord, SecurityEventRecord, SourceRecord, Storage, SyncEnvelope,
 };
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
@@ -326,6 +326,21 @@ struct UpsertDeviceRequest {
     service_overrides: Option<Vec<DeviceServiceOverrideRecord>>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SyncStatePayloadV1 {
+    version: u32,
+    exported_at: chrono::DateTime<chrono::Utc>,
+    blocklists: Vec<SourceRecord>,
+    devices: Vec<DeviceRecord>,
+    classifier: ClassifierSettings,
+    notifications: NotificationSettings,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ImportSyncEnvelopeRequest {
+    envelope: SyncEnvelope,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -578,6 +593,8 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route("/api/v1/sync/export", get(export_sync_state))
+        .route("/api/v1/sync/import", post(import_sync_state))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -832,6 +849,138 @@ async fn settings_summary(
             notifications,
             notification_test_presets,
             runtime_guard: state.runtime_guard.clone(),
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncImportResult {
+    imported_sources: usize,
+    imported_devices: usize,
+}
+
+async fn export_sync_state(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<SyncEnvelope>>, axum::http::StatusCode> {
+    let payload = SyncStatePayloadV1 {
+        version: 1,
+        exported_at: chrono::Utc::now(),
+        blocklists: state
+            .storage
+            .list_sources()
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+        devices: state
+            .storage
+            .list_devices()
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+        classifier: state.dns_runtime.classifier_settings(),
+        notifications: state
+            .notification_settings
+            .read()
+            .expect("notification settings lock poisoned")
+            .clone(),
+    };
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let envelope = state.storage.sign_sync_payload(&payload_bytes);
+
+    Ok(Json(ApiEnvelope { data: envelope }))
+}
+
+async fn import_sync_state(
+    State(state): State<ServerState>,
+    Json(request): Json<ImportSyncEnvelopeRequest>,
+) -> Result<Json<ApiEnvelope<SyncImportResult>>, axum::http::StatusCode> {
+    let payload_bytes = Storage::verify_sync_envelope(&request.envelope)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+    let payload: SyncStatePayloadV1 =
+        serde_json::from_slice(&payload_bytes).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    if payload.version != 1 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let existing_sources = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    for source in existing_sources {
+        let _ = state
+            .storage
+            .delete_source(source.id)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    for source in &payload.blocklists {
+        state
+            .storage
+            .insert_source(source)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    let existing_devices = state
+        .storage
+        .list_devices()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    for device in existing_devices {
+        let _ = state
+            .storage
+            .delete_device(device.id)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    for device in &payload.devices {
+        state
+            .storage
+            .upsert_device(device)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    persist_classifier_settings(&state.storage, &payload.classifier)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .dns_runtime
+        .replace_classifier_settings(payload.classifier.clone());
+
+    persist_notification_settings(&state.storage, &payload.notifications)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Ok(mut notifications) = state.notification_settings.write() {
+        *notifications = payload.notifications.clone();
+    }
+
+    sync_runtime_device_policies(&state)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "sync.state_imported".to_string(),
+            payload: serde_json::json!({
+                "from": request.envelope.node_public_key,
+                "sources": payload.blocklists.len(),
+                "devices": payload.devices.len(),
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: SyncImportResult {
+            imported_sources: payload.blocklists.len(),
+            imported_devices: payload.devices.len(),
         },
     }))
 }
