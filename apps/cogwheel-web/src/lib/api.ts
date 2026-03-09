@@ -211,6 +211,13 @@ export type TailscaleRollbackResult = {
   previous_state: boolean | null;
 };
 
+export type TailscaleDnsCheckResult = {
+  configured: boolean;
+  message: string;
+  local_dns_server: string | null;
+  suggestions: string[];
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -368,4 +375,5 @@ export const api = {
     fetchJson<TailscaleRollbackResult>("/api/v1/tailscale/rollback", {
       method: "POST",
     }),
+  tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
 };
