@@ -36,6 +36,7 @@ pub struct DnsRuntime {
     devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
     classifier_settings: Arc<RwLock<ClassifierSettings>>,
     classification_observer: Arc<RwLock<Option<ClassificationObserver>>>,
+    global_pause_until: Arc<RwLock<Option<DateTime<Utc>>>>,
     cache: Cache<String, CachedLookup>,
     fallback_cache: Cache<String, CachedLookup>,
     stats: Arc<DnsRuntimeStats>,
@@ -96,6 +97,7 @@ impl DnsRuntime {
             devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
             classifier_settings: Arc::new(RwLock::new(classifier_settings)),
             classification_observer: Arc::new(RwLock::new(None)),
+            global_pause_until: Arc::new(RwLock::new(None)),
             cache: Cache::new(10_000),
             fallback_cache: Cache::new(10_000),
             stats: Arc::new(DnsRuntimeStats::default()),
@@ -362,11 +364,38 @@ impl DnsRuntime {
         }
     }
 
+    pub fn pause_protection_until(&self, until: DateTime<Utc>) {
+        if let Ok(mut guard) = self.global_pause_until.write() {
+            *guard = Some(until);
+        }
+    }
+
+    pub fn resume_protection(&self) {
+        if let Ok(mut guard) = self.global_pause_until.write() {
+            *guard = None;
+        }
+    }
+
+    pub fn protection_paused_until(&self) -> Option<DateTime<Utc>> {
+        self.global_pause_until.read().ok().and_then(|guard| *guard)
+    }
+
     fn policy_for_client(
         &self,
         client_addr: Option<SocketAddr>,
         domain: &str,
     ) -> (Arc<PolicyEngine>, String, Option<BlockMode>) {
+        if let Some(until) = self.protection_paused_until() {
+            if Utc::now() < until {
+                let allow_all_policy = self
+                    .allow_all_policy
+                    .read()
+                    .expect("allow-all policy lock poisoned")
+                    .clone();
+                return (allow_all_policy, "global-pause".to_string(), None);
+            }
+        }
+
         let global = self.policy.read().expect("policy lock poisoned").clone();
         let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
             return (global.clone(), global.artifact().hash.clone(), None);

@@ -154,6 +154,7 @@ export type NotificationTestPreset = {
 
 export type DashboardSummary = {
   protection_status: string;
+  protection_paused_until: string | null;
   active_ruleset: RulesetSummary | null;
   source_count: number;
   enabled_source_count: number;
@@ -227,6 +228,15 @@ export const api = {
     ),
   runtimeHealthCheck: () =>
     fetchJson<RuntimeHealth>("/api/v1/runtime/health/check", {
+      method: "POST",
+    }),
+  pauseRuntime: (minutes: number) =>
+    fetchJson<void>("/api/v1/runtime/pause", {
+      method: "POST",
+      body: JSON.stringify({ minutes }),
+    }),
+  resumeRuntime: () =>
+    fetchJson<void>("/api/v1/runtime/resume", {
       method: "POST",
     }),
   updateClassifier: (mode: SettingsSummary["classifier"]["mode"], threshold: number) =>

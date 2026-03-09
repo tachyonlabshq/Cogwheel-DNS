@@ -82,6 +82,7 @@ struct RuntimeHealthResponse {
 #[derive(serde::Serialize)]
 struct DashboardSummary {
     protection_status: String,
+    protection_paused_until: Option<chrono::DateTime<chrono::Utc>>,
     active_ruleset: Option<RulesetSummary>,
     source_count: usize,
     enabled_source_count: usize,
@@ -575,6 +576,8 @@ fn admin_router() -> Router<ServerState> {
             "/api/v1/runtime/health/check",
             post(run_runtime_health_check),
         )
+        .route("/api/v1/runtime/pause", post(pause_runtime))
+        .route("/api/v1/runtime/resume", post(resume_runtime))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -753,13 +756,24 @@ async fn dashboard_summary(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let protection_paused_until = state.dns_runtime.protection_paused_until();
+
     Ok(Json(ApiEnvelope {
         data: DashboardSummary {
-            protection_status: if runtime_health.degraded {
+            protection_status: if let Some(until) = protection_paused_until {
+                if chrono::Utc::now() < until {
+                    "Paused".to_string()
+                } else if runtime_health.degraded {
+                    "Needs Attention".to_string()
+                } else {
+                    "Protected".to_string()
+                }
+            } else if runtime_health.degraded {
                 "Needs Attention".to_string()
             } else {
                 "Protected".to_string()
             },
+            protection_paused_until,
             active_ruleset,
             source_count: sources.len(),
             enabled_source_count: sources.iter().filter(|source| source.enabled).count(),
@@ -959,6 +973,53 @@ async fn run_runtime_health_check(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(serde::Deserialize)]
+struct PauseRuntimeRequest {
+    minutes: u32,
+}
+
+async fn pause_runtime(
+    State(state): State<ServerState>,
+    Json(request): Json<PauseRuntimeRequest>,
+) -> Result<(), axum::http::StatusCode> {
+    let until = chrono::Utc::now() + chrono::Duration::minutes(request.minutes as i64);
+    state.dns_runtime.pause_protection_until(until);
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: uuid::Uuid::new_v4(),
+            event_type: "runtime.protection_paused".to_string(),
+            payload: serde_json::json!({
+                "minutes": request.minutes,
+                "until": until,
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(())
+}
+
+async fn resume_runtime(State(state): State<ServerState>) -> Result<(), axum::http::StatusCode> {
+    state.dns_runtime.resume_protection();
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: uuid::Uuid::new_v4(),
+            event_type: "runtime.protection_resumed".to_string(),
+            payload: "{}".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(())
 }
 
 async fn refresh_sources(

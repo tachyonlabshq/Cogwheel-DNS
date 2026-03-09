@@ -12,6 +12,7 @@ type Toast = { id: number; title: string; detail?: string; tone: "success" | "er
 
 const emptyDashboard: DashboardSummary = {
   protection_status: "Loading",
+  protection_paused_until: null,
   active_ruleset: null,
   source_count: 0,
   enabled_source_count: 0,
@@ -227,6 +228,15 @@ export default function App() {
       };
     }
 
+    if (dashboard.protection_status === "Paused") {
+      return {
+        label: "Paused",
+        detail: `Protection is temporarily disabled until ${new Date(dashboard.protection_paused_until!).toLocaleTimeString()}.`,
+        tone: "ghost" as const,
+        action: "resume" as const,
+      };
+    }
+
     if (dashboard.runtime_health.degraded) {
       return {
         label: "Needs attention",
@@ -251,7 +261,7 @@ export default function App() {
       tone: "primary" as const,
       action: "refresh" as const,
     };
-  }, [busyAction, dashboard.notification_health.delivered_count, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes, error, state]);
+  }, [busyAction, dashboard.notification_health.delivered_count, dashboard.notification_health.failed_count, dashboard.protection_paused_until, dashboard.protection_status, dashboard.runtime_health.degraded, dashboard.runtime_health.notes, error, state]);
 
   const recoveryActions = useMemo(() => {
     const actions: Array<{
@@ -438,6 +448,32 @@ export default function App() {
       sampleDomains: domains.slice(0, 4),
     };
   }, [deviceServiceOverrideMode, selectedDeviceServiceManifest]);
+
+  async function handlePauseRuntime(minutes: number) {
+    setBusyAction("pause-runtime");
+    try {
+      await api.pauseRuntime(minutes);
+      pushToast("Protection paused", `Adblocking and classification paused for ${minutes} minutes.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Pause failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleResumeRuntime() {
+    setBusyAction("resume-runtime");
+    try {
+      await api.resumeRuntime();
+      pushToast("Protection resumed", "Adblocking and classification are active again.", "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Resume failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   async function handleClassifierUpdate(mode: SettingsSummary["classifier"]["mode"]) {
     setBusyAction(`classifier-mode-${mode}`);
@@ -814,6 +850,15 @@ export default function App() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                {dashboard.protection_status === "Paused" ? (
+                  <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>
+                    Resume protection
+                  </Button>
+                ) : (
+                  <Button variant="ghost" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>
+                    Pause 10m
+                  </Button>
+                )}
                 <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
                   <RefreshCw className="mr-2 size-4" />
                   Refresh sources
@@ -831,6 +876,11 @@ export default function App() {
                   <div className="max-w-2xl text-sm text-muted-foreground">{controlPlaneStatus.detail}</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  {controlPlaneStatus.action === "resume" ? (
+                    <Button variant="secondary" size="sm" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>
+                      Resume protection
+                    </Button>
+                  ) : null}
                   {controlPlaneStatus.action === "health-check" ? (
                     <Button variant="secondary" size="sm" onClick={handleRuntimeHealthCheck} disabled={busyAction === "runtime-health-check"}>
                       {busyAction === "runtime-health-check" ? "Checking..." : "Run health check"}
