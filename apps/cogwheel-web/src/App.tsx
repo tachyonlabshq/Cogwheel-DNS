@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus, type TailscaleStatus } from "@/lib/api";
+import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus, type TailscaleStatus, type TailscaleDnsCheckResult } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -85,11 +85,19 @@ const emptyTailscaleStatus: TailscaleStatus = {
   last_error: null,
 };
 
+const emptyTailscaleDnsCheck: TailscaleDnsCheckResult = {
+  configured: false,
+  message: "",
+  local_dns_server: null,
+  suggestions: [],
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
   const [syncStatus, setSyncStatus] = useState<SyncNodeStatus>(emptySyncStatus);
   const [tailscaleStatus, setTailscaleStatus] = useState<TailscaleStatus>(emptyTailscaleStatus);
+  const [tailscaleDnsCheck, setTailscaleDnsCheck] = useState<TailscaleDnsCheckResult>(emptyTailscaleDnsCheck);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -139,33 +147,38 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData, syncStatusData, tailscaleData] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
         api.syncStatus(),
         api.tailscaleStatus(),
+        api.tailscaleDnsCheck(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
       localStorage.setItem("cogwheel_sync_status_cache", JSON.stringify(syncStatusData));
       localStorage.setItem("cogwheel_tailscale_cache", JSON.stringify(tailscaleData));
+      localStorage.setItem("cogwheel_tailscale_dns_cache", JSON.stringify(tailscaleDns));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setSyncStatus(syncStatusData);
       setTailscaleStatus(tailscaleData);
+      setTailscaleDnsCheck(tailscaleDns);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
       const cachedSettings = localStorage.getItem("cogwheel_settings_cache");
       const cachedSyncStatus = localStorage.getItem("cogwheel_sync_status_cache");
       const cachedTailscale = localStorage.getItem("cogwheel_tailscale_cache");
+      const cachedTailscaleDns = localStorage.getItem("cogwheel_tailscale_dns_cache");
 
-      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
           setSyncStatus(JSON.parse(cachedSyncStatus) as SyncNodeStatus);
           setTailscaleStatus(JSON.parse(cachedTailscale) as TailscaleStatus);
+          setTailscaleDnsCheck(JSON.parse(cachedTailscaleDns) as TailscaleDnsCheckResult);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -1166,6 +1179,20 @@ export default function App() {
                   {!tailscaleStatus.exit_node_active && (
                     <div className="text-xs text-muted-foreground">
                       Exit-node mode routes all tailnet traffic through this node, enabling DNS filtering for connected clients.
+                    </div>
+                  )}
+                  {tailscaleDnsCheck.suggestions.length > 0 && (
+                    <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                      <div className="font-medium">DNS filtering status</div>
+                      <div className="mt-1">{tailscaleDnsCheck.message}</div>
+                      {tailscaleDnsCheck.local_dns_server && (
+                        <div className="mt-1">Local DNS: {tailscaleDnsCheck.local_dns_server}</div>
+                      )}
+                      <div className="mt-2 space-y-1">
+                        {tailscaleDnsCheck.suggestions.map((suggestion, idx) => (
+                          <div key={idx}>{suggestion}</div>
+                        ))}
+                      </div>
                     </div>
                   )}
                   <Button

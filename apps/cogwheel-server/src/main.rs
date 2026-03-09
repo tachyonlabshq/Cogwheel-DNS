@@ -619,6 +619,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/tailscale/status", get(tailscale_status))
         .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
         .route("/api/v1/tailscale/rollback", post(tailscale_rollback))
+        .route("/api/v1/tailscale/dns-check", get(tailscale_dns_check))
         .route("/api/v1/sync/status", get(sync_status))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
@@ -1246,6 +1247,78 @@ async fn tailscale_rollback()
                 }
             ),
             previous_state: Some(saved_state.exit_node_enabled),
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TailscaleDnsCheckResult {
+    configured: bool,
+    message: String,
+    local_dns_server: Option<String>,
+    suggestions: Vec<String>,
+}
+
+fn get_local_dns_server() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/etc/resolv.conf")
+            .ok()?
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.starts_with("nameserver") {
+                    line.split_whitespace().nth(1).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+async fn tailscale_dns_check() -> Result<Json<ApiEnvelope<TailscaleDnsCheckResult>>, (axum::http::StatusCode, String)> {
+    let status = load_tailscale_status();
+    let local_dns = get_local_dns_server();
+
+    let mut suggestions = Vec::new();
+    let mut configured = true;
+    let message: String;
+
+    if !status.installed {
+        message = "Tailscale is not installed on this machine.".to_string();
+        configured = false;
+    } else if !status.daemon_running {
+        message = "Tailscale daemon is not running.".to_string();
+        configured = false;
+    } else if !status.exit_node_active {
+        message = "Exit-node mode is not active. Enable it to start filtering tailnet traffic.".to_string();
+        suggestions.push("Click 'Enable exit node' in the dashboard to start filtering.".to_string());
+    } else {
+        message = "Exit-node mode is active. DNS filtering is enabled for tailnet clients.".to_string();
+        if let Some(ref dns) = local_dns {
+            suggestions.push(format!(
+                "This machine is using {} as its DNS server. Ensure Cogwheel is running on {} to filter DNS queries.",
+                dns, dns
+            ));
+        }
+        suggestions.push("Tailnet clients will use this node as their exit node and DNS queries will be filtered.".to_string());
+    }
+
+    if status.exit_node_active {
+        suggestions.push("To verify filtering is working, connect another tailnet client and check its DNS queries are blocked.".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: TailscaleDnsCheckResult {
+            configured,
+            message,
+            local_dns_server: local_dns,
+            suggestions,
         },
     }))
 }
