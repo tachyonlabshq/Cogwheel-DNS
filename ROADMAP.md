@@ -231,7 +231,7 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 - [ ] Expose only the two primary settings groups: blocklists and classifier.
 - [ ] Add optional `Services` view for curated allow/block toggles without exposing raw DNS complexity.
 - [ ] Add one-click safe actions: `Pause 10m`, `Rollback`, `Trust Domain`.
-- [ ] Add guided issue recovery flows (no jargon, plain language).
+- [x] Add guided issue recovery flows (no jargon, plain language).
 - [ ] Implement local-first UX: app remains useful during temporary server disconnects.
 - [x] Build the UI with `shadcn/ui` components and a tightly constrained design system for Apple-like clarity.
 - [ ] Evaluate optional Tauri packaging for native desktop distribution without moving backend logic out of Rust.
@@ -248,6 +248,7 @@ Current implementation notes:
 - The home dashboard now calls out a single control-plane state (`Protected`, `Updating`, or `Needs attention`) and suggests the next recovery action inline so operators can react without scanning every panel.
 - Audit feed cards now summarize structured payload details instead of only showing raw event types, making rollback, runtime, notification, and device changes faster to interpret.
 - The dashboard now includes guided recovery actions plus a setup checklist, giving operators plain-language next steps while the broader onboarding flow remains under construction.
+- Guided recovery cards now break each runtime, notification, refresh, and rollback issue into step-by-step playbooks instead of a single action button.
 - Setup checklist items now include direct jump actions into the relevant dashboard sections, reducing the amount of page scanning needed during initial configuration.
 - Notification delivery history now supports quick failure/security/control-plane filtering, making webhook troubleshooting faster without leaving the main dashboard.
 - Notification delivery health, history, and failure analytics now read from a dedicated delivery table instead of inferring everything from audit events.

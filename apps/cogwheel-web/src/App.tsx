@@ -254,6 +254,7 @@ export default function App() {
     const actions: Array<{
       title: string;
       detail: string;
+      steps: string[];
       actionLabel: string;
       actionKey: "runtime-health-check" | "notifications" | "refresh-sources" | "rollback-ruleset";
       disabled?: boolean;
@@ -263,6 +264,11 @@ export default function App() {
       actions.push({
         title: "Check runtime health again",
         detail: dashboard.runtime_health.notes[0] ?? "Probe the runtime again to confirm whether the issue is still active.",
+        steps: [
+          "Run an active health check to refresh probe results.",
+          "If probes still fail, compare the runtime notes with the most recent ruleset change.",
+          "Roll back if the degraded state appeared after a fresh source update.",
+        ],
         actionLabel: busyAction === "runtime-health-check" ? "Checking..." : "Run health check",
         actionKey: "runtime-health-check",
         disabled: busyAction === "runtime-health-check",
@@ -273,6 +279,11 @@ export default function App() {
       actions.push({
         title: "Review notification delivery",
         detail: "Open recent notification events and look for repeated delivery failures before the next alert is missed.",
+        steps: [
+          "Filter recent delivery history down to failed events.",
+          "Check whether the failures are security alerts or control-plane recovery events.",
+          "Fix the webhook target before relying on the next health or risky-domain alert.",
+        ],
         actionLabel: "Show notifications",
         actionKey: "notifications",
       });
@@ -282,6 +293,11 @@ export default function App() {
       actions.push({
         title: "Refresh sources now",
         detail: "The resolver does not have an active ruleset yet, so request a fresh source refresh from the control plane.",
+        steps: [
+          "Refresh sources to build a fresh candidate ruleset.",
+          "Confirm the active ruleset hash appears in the dashboard summary.",
+          "Re-run a runtime health check once the new ruleset is active.",
+        ],
         actionLabel: busyAction === "refresh-sources" ? "Refreshing..." : "Refresh sources",
         actionKey: "refresh-sources",
         disabled: busyAction === "refresh-sources",
@@ -292,6 +308,11 @@ export default function App() {
       actions.push({
         title: "Roll back to the previous ruleset",
         detail: "If the degraded state appeared after a recent change, roll back to the last known-good policy set.",
+        steps: [
+          "Roll back to the previous verified ruleset.",
+          "Watch the notification history for rollback delivery events.",
+          "Run the health check again to confirm the runtime recovered.",
+        ],
         actionLabel: busyAction === "rollback-ruleset" ? "Rolling back..." : "Roll back",
         actionKey: "rollback-ruleset",
         disabled: busyAction === "rollback-ruleset",
@@ -302,6 +323,11 @@ export default function App() {
       actions.push({
         title: "System looks steady",
         detail: "No immediate recovery flow is needed right now. Use refresh or device editing when you are ready to make the next change.",
+        steps: [
+          "Keep sources fresh before the next policy edit.",
+          "Use the checklist to finish any incomplete setup items.",
+          "Review recent audit events after each meaningful control-plane change.",
+        ],
         actionLabel: busyAction === "refresh-sources" ? "Refreshing..." : "Refresh sources",
         actionKey: "refresh-sources",
         disabled: busyAction === "refresh-sources",
@@ -858,6 +884,14 @@ export default function App() {
               <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
                 <div className="font-medium">{item.title}</div>
                 <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
+                <div className="mt-3 grid gap-2 text-sm text-muted-foreground">
+                  {item.steps.map((step, index) => (
+                    <div key={step} className="flex gap-3 rounded-2xl bg-muted/40 px-3 py-2">
+                      <span className="font-medium text-foreground">{index + 1}</span>
+                      <span>{step}</span>
+                    </div>
+                  ))}
+                </div>
                 <div className="mt-3">
                   <Button
                     variant="secondary"
