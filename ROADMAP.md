@@ -304,7 +304,7 @@ Goal: Reach stable beta quality for real-world always-on use.
 - [ ] Run load and soak tests (mixed cache hit/miss and update windows).
 - [ ] Add strict false-positive budget gates for release candidates.
 - [ ] Add resilience drills: upstream outage, DB corruption simulation, failed list source, sync partition.
-- [ ] Implement backup/restore and automated recovery checks.
+- [x] Implement backup/restore and automated recovery checks.
 - [x] Add abuse protections and rate limiting on management APIs.
 - [ ] Benchmark Rust-specific optimizations: compact rule storage, matcher hot paths, async task partitioning, and optional SIMD feature extraction.
 - [ ] Benchmark optional Linux fast path (`eBPF`/`XDP`) as future optimization track.

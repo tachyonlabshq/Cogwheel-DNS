@@ -664,6 +664,8 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
+        .route("/api/v1/backup", get(backup_data))
+        .route("/api/v1/backup/restore", post(restore_data))
 }
 
 async fn list_sources(
@@ -2023,6 +2025,98 @@ async fn list_audit_events(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BackupData {
+    version: String,
+    created_at: String,
+    sources: Vec<SourceRecord>,
+    devices: Vec<DeviceRecord>,
+    classifier: ClassifierSettings,
+    notifications: NotificationSettings,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RestoreRequest {
+    data: BackupData,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BackupResult {
+    success: bool,
+    message: String,
+    size_bytes: usize,
+}
+
+async fn backup_data(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<BackupData>>, axum::http::StatusCode> {
+    let sources = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let devices = state
+        .storage
+        .list_devices()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let classifier = state.dns_runtime.classifier_settings();
+    let notifications = state
+        .notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
+
+    let backup = BackupData {
+        version: "1.0".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        sources,
+        devices,
+        classifier,
+        notifications,
+    };
+
+    Ok(Json(ApiEnvelope { data: backup }))
+}
+
+async fn restore_data(
+    State(state): State<ServerState>,
+    Json(request): Json<RestoreRequest>,
+) -> Result<Json<ApiEnvelope<BackupResult>>, axum::http::StatusCode> {
+    let data = request.data;
+    let source_count = data.sources.len();
+    let device_count = data.devices.len();
+    let size_bytes = serde_json::to_string(&data).map(|s| s.len()).unwrap_or(0);
+
+    for source in &data.sources {
+        let _ = state.storage.insert_source(source).await;
+    }
+
+    for device in &data.devices {
+        let _ = state.storage.upsert_device(device).await;
+    }
+
+    {
+        let mut notifications = state.notification_settings.write().unwrap();
+        *notifications = data.notifications;
+    }
+
+    let message = format!(
+        "Restored {} sources, {} devices, classifier and notification settings",
+        source_count, device_count
+    );
+
+    Ok(Json(ApiEnvelope {
+        data: BackupResult {
+            success: true,
+            message,
+            size_bytes,
+        },
+    }))
 }
 
 async fn runtime_snapshot(
