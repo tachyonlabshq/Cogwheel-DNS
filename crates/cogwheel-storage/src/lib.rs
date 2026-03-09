@@ -15,6 +15,7 @@ const MIGRATION_0005: &str = include_str!("../migrations/0005_devices_security_e
 const MIGRATION_0006: &str = include_str!("../migrations/0006_device_protection_override.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_device_allowed_domains.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_device_service_overrides.sql");
+const MIGRATION_0009: &str = include_str!("../migrations/0009_notification_deliveries.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -89,6 +90,21 @@ pub struct SecurityEventRecord {
     pub domain: String,
     pub classifier_score: f64,
     pub severity: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationDeliveryRecord {
+    pub id: Uuid,
+    pub event_type: String,
+    pub status: String,
+    pub severity: String,
+    pub title: String,
+    pub summary: String,
+    pub domain: String,
+    pub device_name: Option<String>,
+    pub client_ip: String,
+    pub attempts: usize,
     pub created_at: DateTime<Utc>,
 }
 
@@ -417,6 +433,59 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
+
+    pub async fn record_notification_delivery(
+        &self,
+        delivery: &NotificationDeliveryRecord,
+    ) -> Result<(), StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        connection.execute(
+            "INSERT INTO notification_deliveries (id, event_type, status, severity, title, summary, domain, device_name, client_ip, attempts, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                delivery.id.to_string(),
+                delivery.event_type,
+                delivery.status,
+                delivery.severity,
+                delivery.title,
+                delivery.summary,
+                delivery.domain,
+                delivery.device_name,
+                delivery.client_ip,
+                delivery.attempts as i64,
+                delivery.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn recent_notification_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<NotificationDeliveryRecord>, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, event_type, status, severity, title, summary, domain, device_name, client_ip, attempts, created_at FROM notification_deliveries ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| {
+            Ok(NotificationDeliveryRecord {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                event_type: row.get(1)?,
+                status: row.get(2)?,
+                severity: row.get(3)?,
+                title: row.get(4)?,
+                summary: row.get(5)?,
+                domain: row.get(6)?,
+                device_name: row.get(7)?,
+                client_ip: row.get(8)?,
+                attempts: row.get::<_, i64>(9)? as usize,
+                created_at: parse_datetime(&row.get::<_, String>(10)?).map_err(to_sqlite_error)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
 }
 
 fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
@@ -428,6 +497,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0006);
     let _ = connection.execute_batch(MIGRATION_0007);
     let _ = connection.execute_batch(MIGRATION_0008);
+    let _ = connection.execute_batch(MIGRATION_0009);
     Ok(())
 }
 
