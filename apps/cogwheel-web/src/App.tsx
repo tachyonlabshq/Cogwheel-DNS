@@ -1244,7 +1244,14 @@ export default function App() {
                   <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
                     <div className="text-muted-foreground">Success rate</div>
                     <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
-                    <div className="mt-1 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
+                    {dashboard.recent_notification_deliveries.length > 0 ? (
+                      <div className="mt-2 flex items-end gap-[2px] h-6 w-full">
+                        {[...dashboard.recent_notification_deliveries].reverse().map((d, i) => (
+                          <div key={i} title={`${new Date(d.created_at).toLocaleTimeString()}: ${d.status}`} className={`flex-1 max-w-[8px] rounded-[1px] ${d.status === "delivered" ? "bg-emerald-500/60 h-full" : "bg-destructive/80 h-3"}`} />
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="mt-2 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
                   </div>
                   <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
                     <div className="text-muted-foreground">Top failed domains</div>

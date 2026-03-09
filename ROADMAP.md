@@ -250,6 +250,7 @@ Current implementation notes:
 - A one-click "Pause 10m" action on the dashboard now globally bypasses all DNS blocking policies for temporary troubleshooting.
 - The onboarding wizard is now integrated directly into the dashboard as a "Setup checklist", avoiding an intrusive modal flow while maintaining clear first-run goals.
 - Local-first UX caching is now implemented, persisting dashboard and settings states to `localStorage` so the UI remains fully rendered and useful even if the control plane drops offline briefly.
+- Added visual trend lines for notification deliveries, showing a sparkline of recent success/failure payloads directly on the dashboard.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
