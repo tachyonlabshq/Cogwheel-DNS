@@ -17,8 +17,8 @@ use cogwheel_services::{
     compile_service_rule_layer,
 };
 use cogwheel_storage::{
-    AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, RulesetRecord, SecurityEventRecord,
-    SourceRecord, Storage,
+    AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, NotificationDeliveryRecord,
+    RulesetRecord, SecurityEventRecord, SourceRecord, Storage,
 };
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
@@ -722,14 +722,14 @@ async fn dashboard_summary(
         .recent_audit_events(5)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notification_analytics_audit_events = state
+    let notification_analytics_deliveries = state
         .storage
-        .recent_audit_events(notification_window as i64)
+        .recent_notification_deliveries(notification_window as i64)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notification_history_audit_events = state
+    let notification_history_deliveries = state
         .storage
-        .recent_audit_events(notification_history_window as i64)
+        .recent_notification_deliveries(notification_history_window as i64)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let devices = state
@@ -745,11 +745,10 @@ async fn dashboard_summary(
     let security_summary = build_security_summary(&security_events);
     let recent_security_events = security_events.into_iter().take(5).collect();
     let recent_notification_deliveries =
-        build_notification_delivery_events(&notification_history_audit_events);
-    let notification_health =
-        build_notification_health_summary(&notification_analytics_audit_events);
+        build_notification_delivery_events(&notification_history_deliveries);
+    let notification_health = build_notification_health_summary(&notification_analytics_deliveries);
     let notification_failure_analytics =
-        build_notification_failure_analytics(&notification_analytics_audit_events);
+        build_notification_failure_analytics(&notification_analytics_deliveries);
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2355,117 +2354,50 @@ fn build_security_summary(events: &[SecurityEventRecord]) -> SecuritySummary {
 }
 
 fn build_notification_delivery_events(
-    audit_events: &[AuditEvent],
+    deliveries: &[NotificationDeliveryRecord],
 ) -> Vec<NotificationDeliveryEvent> {
-    audit_events
+    deliveries
         .iter()
-        .filter_map(|event| {
-            let status = match event.event_type.as_str() {
-                "security.alert_delivery_succeeded" => "delivered",
-                "security.alert_delivery_failed" => "failed",
-                "notification.delivery_succeeded" => "delivered",
-                "notification.delivery_failed" => "failed",
-                _ => return None,
-            };
-            let payload: serde_json::Value = serde_json::from_str(&event.payload).ok()?;
-            let event_type = payload
-                .get("event_type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("security.alert_raised")
-                .to_string();
-            let title = payload
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    payload
-                        .get("domain")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("Notification")
-                        .to_string()
-                });
-            let summary = payload
-                .get("summary")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    let severity = payload
-                        .get("severity")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    let target = payload
-                        .get("device_name")
-                        .and_then(serde_json::Value::as_str)
-                        .or_else(|| payload.get("client_ip").and_then(serde_json::Value::as_str))
-                        .unwrap_or("unknown target");
-                    let attempts = payload
-                        .get("attempts")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    format!(
-                        "{} alert for {} after {} attempt(s).",
-                        severity, target, attempts
-                    )
-                });
-            Some(NotificationDeliveryEvent {
-                status: status.to_string(),
-                event_type,
-                severity: payload
-                    .get("severity")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                title,
-                summary,
-                target: payload
-                    .get("device_name")
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| payload.get("client_ip").and_then(serde_json::Value::as_str))
-                    .unwrap_or("control-plane")
-                    .to_string(),
-                domain: payload
-                    .get("domain")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("control-plane")
-                    .to_string(),
-                device_name: payload
-                    .get("device_name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string),
-                client_ip: payload
-                    .get("client_ip")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("control-plane")
-                    .to_string(),
-                attempts: payload
-                    .get("attempts")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
-                created_at: event.created_at,
-            })
+        .map(|delivery| NotificationDeliveryEvent {
+            status: delivery.status.clone(),
+            event_type: delivery.event_type.clone(),
+            severity: delivery.severity.clone(),
+            title: delivery.title.clone(),
+            summary: delivery.summary.clone(),
+            target: delivery
+                .device_name
+                .clone()
+                .unwrap_or_else(|| delivery.client_ip.clone()),
+            domain: delivery.domain.clone(),
+            device_name: delivery.device_name.clone(),
+            client_ip: delivery.client_ip.clone(),
+            attempts: delivery.attempts,
+            created_at: delivery.created_at,
         })
         .take(5)
         .collect()
 }
 
-fn build_notification_health_summary(audit_events: &[AuditEvent]) -> NotificationHealthSummary {
+fn build_notification_health_summary(
+    deliveries: &[NotificationDeliveryRecord],
+) -> NotificationHealthSummary {
     let mut delivered_count = 0;
     let mut failed_count = 0;
     let mut last_delivery_at = None;
     let mut last_failure_at = None;
 
-    for event in audit_events {
-        match event.event_type.as_str() {
-            "security.alert_delivery_succeeded" | "notification.delivery_succeeded" => {
+    for delivery in deliveries {
+        match delivery.status.as_str() {
+            "delivered" => {
                 delivered_count += 1;
-                if last_delivery_at.is_none_or(|current| event.created_at > current) {
-                    last_delivery_at = Some(event.created_at);
+                if last_delivery_at.is_none_or(|current| delivery.created_at > current) {
+                    last_delivery_at = Some(delivery.created_at);
                 }
             }
-            "security.alert_delivery_failed" | "notification.delivery_failed" => {
+            "failed" => {
                 failed_count += 1;
-                if last_failure_at.is_none_or(|current| event.created_at > current) {
-                    last_failure_at = Some(event.created_at);
+                if last_failure_at.is_none_or(|current| delivery.created_at > current) {
+                    last_failure_at = Some(delivery.created_at);
                 }
             }
             _ => {}
@@ -2481,26 +2413,19 @@ fn build_notification_health_summary(audit_events: &[AuditEvent]) -> Notificatio
 }
 
 fn build_notification_failure_analytics(
-    audit_events: &[AuditEvent],
+    deliveries: &[NotificationDeliveryRecord],
 ) -> NotificationFailureAnalytics {
     let mut delivered_count = 0usize;
     let mut failed_count = 0usize;
     let mut failed_domains = HashMap::<String, usize>::new();
 
-    for event in audit_events {
-        match event.event_type.as_str() {
-            "security.alert_delivery_succeeded" | "notification.delivery_succeeded" => {
-                delivered_count += 1
-            }
-            "security.alert_delivery_failed" | "notification.delivery_failed" => {
+    for delivery in deliveries {
+        match delivery.status.as_str() {
+            "delivered" => delivered_count += 1,
+            "failed" => {
                 failed_count += 1;
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
-                    if let Some(domain) = payload.get("domain").and_then(serde_json::Value::as_str)
-                    {
-                        if domain != "control-plane" {
-                            *failed_domains.entry(domain.to_string()).or_insert(0) += 1;
-                        }
-                    }
+                if delivery.domain != "control-plane" {
+                    *failed_domains.entry(delivery.domain.clone()).or_insert(0) += 1;
                 }
             }
             _ => {}
@@ -2678,6 +2603,27 @@ async fn deliver_operational_notification(
         match send_notification(client, settings, &event).await {
             Ok(()) => {
                 storage
+                    .record_notification_delivery(&NotificationDeliveryRecord {
+                        id: Uuid::new_v4(),
+                        event_type: event.event_type.clone(),
+                        status: "delivered".to_string(),
+                        severity: event.severity.clone(),
+                        title: event.title.clone(),
+                        summary: event.summary.clone(),
+                        domain: event
+                            .domain
+                            .clone()
+                            .unwrap_or_else(|| "control-plane".to_string()),
+                        device_name: event.device_name.clone(),
+                        client_ip: event
+                            .client_ip
+                            .clone()
+                            .unwrap_or_else(|| "control-plane".to_string()),
+                        attempts: attempt + 1,
+                        created_at: event.created_at,
+                    })
+                    .await?;
+                storage
                     .record_audit_event(&AuditEvent {
                         id: Uuid::new_v4(),
                         event_type: "notification.delivery_succeeded".to_string(),
@@ -2706,6 +2652,28 @@ async fn deliver_operational_notification(
     }
 
     let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
+
+    storage
+        .record_notification_delivery(&NotificationDeliveryRecord {
+            id: Uuid::new_v4(),
+            event_type: event.event_type.clone(),
+            status: "failed".to_string(),
+            severity: event.severity.clone(),
+            title: event.title.clone(),
+            summary: event.summary.clone(),
+            domain: event
+                .domain
+                .clone()
+                .unwrap_or_else(|| "control-plane".to_string()),
+            device_name: event.device_name.clone(),
+            client_ip: event
+                .client_ip
+                .clone()
+                .unwrap_or_else(|| "control-plane".to_string()),
+            attempts: 3,
+            created_at: event.created_at,
+        })
+        .await?;
 
     storage
         .record_audit_event(&AuditEvent {
@@ -2744,6 +2712,28 @@ async fn deliver_security_notification(
         match send_security_notification(client, settings, security_event).await {
             Ok(()) => {
                 storage
+                    .record_notification_delivery(&NotificationDeliveryRecord {
+                        id: Uuid::new_v4(),
+                        event_type: "security.alert_raised".to_string(),
+                        status: "delivered".to_string(),
+                        severity: security_event.severity.clone(),
+                        title: security_event.domain.clone(),
+                        summary: format!(
+                            "{} alert for {}.",
+                            security_event.severity,
+                            security_event
+                                .device_name
+                                .as_deref()
+                                .unwrap_or(&security_event.client_ip)
+                        ),
+                        domain: security_event.domain.clone(),
+                        device_name: security_event.device_name.clone(),
+                        client_ip: security_event.client_ip.clone(),
+                        attempts: attempt + 1,
+                        created_at: security_event.created_at,
+                    })
+                    .await?;
+                storage
                     .record_audit_event(&AuditEvent {
                         id: Uuid::new_v4(),
                         event_type: "security.alert_delivery_succeeded".to_string(),
@@ -2769,6 +2759,29 @@ async fn deliver_security_notification(
     }
 
     let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
+
+    storage
+        .record_notification_delivery(&NotificationDeliveryRecord {
+            id: Uuid::new_v4(),
+            event_type: "security.alert_raised".to_string(),
+            status: "failed".to_string(),
+            severity: security_event.severity.clone(),
+            title: security_event.domain.clone(),
+            summary: format!(
+                "{} alert for {}.",
+                security_event.severity,
+                security_event
+                    .device_name
+                    .as_deref()
+                    .unwrap_or(&security_event.client_ip)
+            ),
+            domain: security_event.domain.clone(),
+            device_name: security_event.device_name.clone(),
+            client_ip: security_event.client_ip.clone(),
+            attempts: 3,
+            created_at: security_event.created_at,
+        })
+        .await?;
 
     storage
         .record_audit_event(&AuditEvent {
@@ -3264,28 +3277,20 @@ mod tests {
     }
 
     #[test]
-    fn build_notification_delivery_events_filters_audit_payloads() {
-        let deliveries = build_notification_delivery_events(&[
-            AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_succeeded".to_string(),
-                payload: serde_json::json!({
-                    "severity": "high",
-                    "domain": "notify.example",
-                    "device_name": "Laptop",
-                    "client_ip": "192.168.1.25",
-                    "attempts": 2,
-                })
-                .to_string(),
-                created_at: Utc::now(),
-            },
-            AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "device.upserted".to_string(),
-                payload: "{}".to_string(),
-                created_at: Utc::now(),
-            },
-        ]);
+    fn build_notification_delivery_events_maps_delivery_records() {
+        let deliveries = build_notification_delivery_events(&[NotificationDeliveryRecord {
+            id: Uuid::new_v4(),
+            event_type: "security.alert_raised".to_string(),
+            status: "delivered".to_string(),
+            severity: "high".to_string(),
+            title: "notify.example".to_string(),
+            summary: "high alert for Laptop after 2 attempt(s).".to_string(),
+            domain: "notify.example".to_string(),
+            device_name: Some("Laptop".to_string()),
+            client_ip: "192.168.1.25".to_string(),
+            attempts: 2,
+            created_at: Utc::now(),
+        }]);
 
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].status, "delivered");
@@ -3298,18 +3303,17 @@ mod tests {
 
     #[test]
     fn build_notification_delivery_events_supports_operational_payloads() {
-        let deliveries = build_notification_delivery_events(&[AuditEvent {
+        let deliveries = build_notification_delivery_events(&[NotificationDeliveryRecord {
             id: Uuid::new_v4(),
-            event_type: "notification.delivery_succeeded".to_string(),
-            payload: serde_json::json!({
-                "event_type": "ruleset.rollback",
-                "severity": "high",
-                "title": "Ruleset rolled back",
-                "summary": "Rolled back to the previous verified ruleset.",
-                "client_ip": "control-plane",
-                "attempts": 1,
-            })
-            .to_string(),
+            event_type: "ruleset.rollback".to_string(),
+            status: "delivered".to_string(),
+            severity: "high".to_string(),
+            title: "Ruleset rolled back".to_string(),
+            summary: "Rolled back to the previous verified ruleset.".to_string(),
+            domain: "control-plane".to_string(),
+            device_name: None,
+            client_ip: "control-plane".to_string(),
+            attempts: 1,
             created_at: Utc::now(),
         }]);
 
@@ -3330,16 +3334,30 @@ mod tests {
     fn build_notification_health_summary_tracks_outcomes() {
         let now = Utc::now();
         let summary = build_notification_health_summary(&[
-            AuditEvent {
+            NotificationDeliveryRecord {
                 id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_succeeded".to_string(),
-                payload: "{}".to_string(),
+                event_type: "security.alert_raised".to_string(),
+                status: "delivered".to_string(),
+                severity: "high".to_string(),
+                title: "ok.example".to_string(),
+                summary: "delivered".to_string(),
+                domain: "ok.example".to_string(),
+                device_name: None,
+                client_ip: "192.168.1.25".to_string(),
+                attempts: 1,
                 created_at: now,
             },
-            AuditEvent {
+            NotificationDeliveryRecord {
                 id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_failed".to_string(),
-                payload: "{}".to_string(),
+                event_type: "security.alert_raised".to_string(),
+                status: "failed".to_string(),
+                severity: "high".to_string(),
+                title: "fail.example".to_string(),
+                summary: "failed".to_string(),
+                domain: "fail.example".to_string(),
+                device_name: None,
+                client_ip: "192.168.1.25".to_string(),
+                attempts: 3,
                 created_at: now + chrono::Duration::seconds(5),
             },
         ]);
@@ -3356,22 +3374,43 @@ mod tests {
     #[test]
     fn build_notification_failure_analytics_tracks_failed_domains() {
         let analytics = build_notification_failure_analytics(&[
-            AuditEvent {
+            NotificationDeliveryRecord {
                 id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_succeeded".to_string(),
-                payload: serde_json::json!({ "domain": "ok.example" }).to_string(),
+                event_type: "security.alert_raised".to_string(),
+                status: "delivered".to_string(),
+                severity: "high".to_string(),
+                title: "ok.example".to_string(),
+                summary: "ok".to_string(),
+                domain: "ok.example".to_string(),
+                device_name: None,
+                client_ip: "192.168.1.25".to_string(),
+                attempts: 1,
                 created_at: Utc::now(),
             },
-            AuditEvent {
+            NotificationDeliveryRecord {
                 id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_failed".to_string(),
-                payload: serde_json::json!({ "domain": "fail.example" }).to_string(),
+                event_type: "security.alert_raised".to_string(),
+                status: "failed".to_string(),
+                severity: "high".to_string(),
+                title: "fail.example".to_string(),
+                summary: "failed".to_string(),
+                domain: "fail.example".to_string(),
+                device_name: None,
+                client_ip: "192.168.1.25".to_string(),
+                attempts: 3,
                 created_at: Utc::now(),
             },
-            AuditEvent {
+            NotificationDeliveryRecord {
                 id: Uuid::new_v4(),
-                event_type: "security.alert_delivery_failed".to_string(),
-                payload: serde_json::json!({ "domain": "fail.example" }).to_string(),
+                event_type: "security.alert_raised".to_string(),
+                status: "failed".to_string(),
+                severity: "high".to_string(),
+                title: "fail.example".to_string(),
+                summary: "failed again".to_string(),
+                domain: "fail.example".to_string(),
+                device_name: None,
+                client_ip: "192.168.1.25".to_string(),
+                attempts: 3,
                 created_at: Utc::now(),
             },
         ]);

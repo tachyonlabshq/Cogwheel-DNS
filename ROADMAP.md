@@ -249,6 +249,7 @@ Current implementation notes:
 - Audit feed cards now summarize structured payload details instead of only showing raw event types, making rollback, runtime, notification, and device changes faster to interpret.
 - The dashboard now includes guided recovery actions plus a setup checklist, giving operators plain-language next steps while the broader onboarding flow remains under construction.
 - Notification delivery history now supports quick failure/security/control-plane filtering, making webhook troubleshooting faster without leaving the main dashboard.
+- Notification delivery health, history, and failure analytics now read from a dedicated delivery table instead of inferring everything from audit events.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
