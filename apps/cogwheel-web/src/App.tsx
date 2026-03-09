@@ -114,10 +114,27 @@ export default function App() {
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
       ]);
+      localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
+      localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setState("ready");
     } catch (loadError) {
+      const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
+      const cachedSettings = localStorage.getItem("cogwheel_settings_cache");
+
+      if (cachedDashboard && cachedSettings) {
+        try {
+          setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
+          setSettings(JSON.parse(cachedSettings) as SettingsSummary);
+          setState("ready");
+          pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
+          return;
+        } catch {
+          // Fall through if parse fails
+        }
+      }
+
       setError(loadError instanceof Error ? loadError.message : "Unknown error");
       setState("error");
     }
