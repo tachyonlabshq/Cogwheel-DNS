@@ -250,6 +250,35 @@ export type ConfigVersionStatus = {
   recommendations: string[];
 };
 
+export type ThreatIntelProviderConfig = {
+  id: string;
+  display_name: string;
+  enabled: boolean;
+  feed_url: string | null;
+  api_key_configured: boolean;
+  update_interval_minutes: number;
+  last_sync_at: string | null;
+  last_error: string | null;
+  capabilities: string[];
+};
+
+export type ThreatIntelSettings = {
+  providers: ThreatIntelProviderConfig[];
+  recommendations: string[];
+};
+
+export type FederatedLearningSettings = {
+  enabled: boolean;
+  coordinator_url: string | null;
+  node_id: string;
+  round_interval_hours: number;
+  last_round_at: string | null;
+  last_model_version: string | null;
+  privacy_mode: string;
+  raw_log_export_enabled: boolean;
+  recommendations: string[];
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -416,4 +445,27 @@ export const api = {
       body: JSON.stringify({ duration_secs, qps, cache_hit_ratio }),
     }),
   configVersion: () => fetchJson<ConfigVersionStatus>("/api/v1/config/version"),
+  threatIntelProviders: () =>
+    fetchJson<ThreatIntelSettings>("/api/v1/threat-intel/providers"),
+  updateThreatIntelProvider: (
+    id: string,
+    enabled: boolean,
+    feed_url: string | null,
+    update_interval_minutes: number,
+  ) =>
+    fetchJson<ThreatIntelSettings>("/api/v1/threat-intel/providers", {
+      method: "POST",
+      body: JSON.stringify({ id, enabled, feed_url, update_interval_minutes }),
+    }),
+  federatedLearningStatus: () =>
+    fetchJson<FederatedLearningSettings>("/api/v1/federated-learning/status"),
+  updateFederatedLearningStatus: (
+    enabled: boolean,
+    coordinator_url: string | null,
+    round_interval_hours: number,
+  ) =>
+    fetchJson<FederatedLearningSettings>("/api/v1/federated-learning/status", {
+      method: "POST",
+      body: JSON.stringify({ enabled, coordinator_url, round_interval_hours }),
+    }),
 };
