@@ -48,6 +48,8 @@ struct ServerState {
     dns_runtime: Arc<DnsRuntime>,
     http_client: Client,
     notification_settings: Arc<RwLock<NotificationSettings>>,
+    threat_intel_settings: Arc<RwLock<ThreatIntelSettings>>,
+    federated_learning_settings: Arc<RwLock<FederatedLearningSettings>>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
@@ -90,6 +92,53 @@ impl RateLimiter {
 struct RuntimePolicyCatalog {
     global_policy: Arc<PolicyEngine>,
     profile_policies: HashMap<String, Arc<PolicyEngine>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ThreatIntelProviderConfig {
+    id: String,
+    display_name: String,
+    enabled: bool,
+    feed_url: Option<String>,
+    api_key_configured: bool,
+    update_interval_minutes: u32,
+    last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_error: Option<String>,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ThreatIntelSettings {
+    providers: Vec<ThreatIntelProviderConfig>,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ThreatIntelProviderUpdate {
+    id: String,
+    enabled: bool,
+    feed_url: Option<String>,
+    update_interval_minutes: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FederatedLearningSettings {
+    enabled: bool,
+    coordinator_url: Option<String>,
+    node_id: String,
+    round_interval_hours: u32,
+    last_round_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_model_version: Option<String>,
+    privacy_mode: String,
+    raw_log_export_enabled: bool,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FederatedLearningUpdate {
+    enabled: bool,
+    coordinator_url: Option<String>,
+    round_interval_hours: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -525,6 +574,8 @@ async fn main() -> Result<()> {
         dns_runtime,
         http_client,
         notification_settings,
+        threat_intel_settings: Arc::new(RwLock::new(default_threat_intel_settings())),
+        federated_learning_settings: Arc::new(RwLock::new(default_federated_learning_settings())),
         protected_domains,
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
@@ -689,6 +740,19 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/load-test", post(run_load_test))
         .route("/api/v1/benchmark/rust-opts", get(benchmark_rust_opts))
         .route("/api/v1/config/version", get(config_version))
+        .route("/api/v1/threat-intel/providers", get(threat_intel_settings))
+        .route(
+            "/api/v1/threat-intel/providers",
+            post(update_threat_intel_provider),
+        )
+        .route(
+            "/api/v1/federated-learning/status",
+            get(federated_learning_settings),
+        )
+        .route(
+            "/api/v1/federated-learning/status",
+            post(update_federated_learning_settings),
+        )
 }
 
 async fn list_sources(
@@ -1163,6 +1227,166 @@ async fn config_version(
             recommendations,
         },
     }))
+}
+
+fn default_threat_intel_settings() -> ThreatIntelSettings {
+    ThreatIntelSettings {
+        providers: vec![
+            ThreatIntelProviderConfig {
+                id: "alphamountain".to_string(),
+                display_name: "alphaMountain DNS Feed".to_string(),
+                enabled: false,
+                feed_url: Some("https://api.example.invalid/threat-intel/dns".to_string()),
+                api_key_configured: false,
+                update_interval_minutes: 30,
+                last_sync_at: None,
+                last_error: None,
+                capabilities: vec!["domain-reputation".to_string(), "malware-c2".to_string()],
+            },
+            ThreatIntelProviderConfig {
+                id: "abuse-ch".to_string(),
+                display_name: "Abuse.ch Import Bridge".to_string(),
+                enabled: false,
+                feed_url: Some(
+                    "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.json"
+                        .to_string(),
+                ),
+                api_key_configured: false,
+                update_interval_minutes: 60,
+                last_sync_at: None,
+                last_error: None,
+                capabilities: vec!["ip-reputation".to_string(), "botnet-tracking".to_string()],
+            },
+        ],
+        recommendations: vec![
+            "Keep threat-intel providers optional so the DNS hot path remains deterministic."
+                .to_string(),
+            "Prefer pull-based feeds with cached snapshots instead of inline blocking lookups."
+                .to_string(),
+        ],
+    }
+}
+
+fn default_federated_learning_settings() -> FederatedLearningSettings {
+    FederatedLearningSettings {
+        enabled: false,
+        coordinator_url: None,
+        node_id: "local-node".to_string(),
+        round_interval_hours: 24,
+        last_round_at: None,
+        last_model_version: None,
+        privacy_mode: "model-updates-only".to_string(),
+        raw_log_export_enabled: false,
+        recommendations: vec![
+            "Share only aggregated model deltas, never raw DNS logs.".to_string(),
+            "Require explicit opt-in before joining a coordinator.".to_string(),
+        ],
+    }
+}
+
+async fn threat_intel_settings(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<ThreatIntelSettings>>, axum::http::StatusCode> {
+    let settings = state
+        .threat_intel_settings
+        .read()
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .clone();
+    Ok(Json(ApiEnvelope { data: settings }))
+}
+
+async fn update_threat_intel_provider(
+    State(state): State<ServerState>,
+    Json(request): Json<ThreatIntelProviderUpdate>,
+) -> Result<Json<ApiEnvelope<ThreatIntelSettings>>, axum::http::StatusCode> {
+    let payload_for_audit;
+    let updated = {
+        let mut settings = state
+            .threat_intel_settings
+            .write()
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        let provider = settings
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == request.id)
+            .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+        provider.enabled = request.enabled;
+        provider.feed_url = request.feed_url.clone();
+        provider.update_interval_minutes = request.update_interval_minutes.max(5);
+        provider.last_error = None;
+        payload_for_audit = serde_json::json!({
+            "provider_id": provider.id,
+            "enabled": provider.enabled,
+            "feed_url": provider.feed_url,
+            "update_interval_minutes": provider.update_interval_minutes,
+        })
+        .to_string();
+        settings.clone()
+    };
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "threat_intel_provider_updated".to_string(),
+            payload: payload_for_audit,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: updated }))
+}
+
+async fn federated_learning_settings(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<FederatedLearningSettings>>, axum::http::StatusCode> {
+    let settings = state
+        .federated_learning_settings
+        .read()
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .clone();
+    Ok(Json(ApiEnvelope { data: settings }))
+}
+
+async fn update_federated_learning_settings(
+    State(state): State<ServerState>,
+    Json(request): Json<FederatedLearningUpdate>,
+) -> Result<Json<ApiEnvelope<FederatedLearningSettings>>, axum::http::StatusCode> {
+    let payload_for_audit;
+    let updated = {
+        let mut settings = state
+            .federated_learning_settings
+            .write()
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        settings.enabled = request.enabled;
+        settings.coordinator_url = request.coordinator_url.clone();
+        settings.round_interval_hours = request.round_interval_hours.max(1);
+        settings.raw_log_export_enabled = false;
+        payload_for_audit = serde_json::json!({
+            "enabled": settings.enabled,
+            "coordinator_url": settings.coordinator_url,
+            "round_interval_hours": settings.round_interval_hours,
+            "privacy_mode": settings.privacy_mode,
+            "raw_log_export_enabled": settings.raw_log_export_enabled,
+        })
+        .to_string();
+        settings.clone()
+    };
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "federated_learning_updated".to_string(),
+            payload: payload_for_audit,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: updated }))
 }
 
 async fn settings_summary(
