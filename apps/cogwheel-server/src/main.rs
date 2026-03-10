@@ -689,7 +689,6 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/load-test", post(run_load_test))
         .route("/api/v1/benchmark/rust-opts", get(benchmark_rust_opts))
         .route("/api/v1/config/version", get(config_version))
-        .route("/api/v1/config/version", get(config_version))
 }
 
 async fn list_sources(
