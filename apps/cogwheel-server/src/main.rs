@@ -795,6 +795,7 @@ fn admin_router() -> Router<ServerState> {
             "/api/v1/false-positive-budget",
             get(false_positive_budget_status),
         )
+        .route("/api/v1/latency-budget", get(latency_budget_status))
         .route("/api/v1/tailscale/status", get(tailscale_status))
         .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
         .route("/api/v1/tailscale/rollback", post(tailscale_rollback))
@@ -2950,6 +2951,23 @@ struct FalsePositiveBudgetStatus {
     recommendations: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct LatencyBudgetCheck {
+    label: String,
+    observed_ms: f64,
+    target_p50_ms: f64,
+    sample_count: u64,
+    status: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LatencyBudgetStatus {
+    within_budget: bool,
+    cache_hit_rate: f64,
+    checks: Vec<LatencyBudgetCheck>,
+    recommendations: Vec<String>,
+}
+
 async fn false_positive_budget_status(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<FalsePositiveBudgetStatus>>, axum::http::StatusCode> {
@@ -2993,6 +3011,97 @@ async fn false_positive_budget_status(
             recommendations,
         },
     }))
+}
+
+async fn latency_budget_status(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<LatencyBudgetStatus>>, axum::http::StatusCode> {
+    let snapshot = state.dns_runtime.snapshot();
+    let queries = snapshot.queries_total.max(1);
+    let cache_hit_rate = snapshot.cache_hits_total as f64 / queries as f64;
+
+    let checks = vec![
+        latency_budget_check(
+            "Cache hit",
+            snapshot.cache_hit_latency_avg_ns,
+            1.0,
+            snapshot.cache_hit_samples,
+        ),
+        latency_budget_check(
+            "Cache miss",
+            snapshot.cache_miss_latency_avg_ns,
+            8.0,
+            snapshot.cache_miss_samples,
+        ),
+        latency_budget_check(
+            "Classifier monitor path",
+            snapshot.classifier_latency_avg_ns,
+            10.0,
+            snapshot.classifier_latency_samples,
+        ),
+    ];
+
+    let within_budget = checks.iter().all(|check| check.status != "over-budget");
+    let mut recommendations = Vec::new();
+
+    if within_budget {
+        recommendations
+            .push("Observed hot-path latency stays within current p50 budget targets.".to_string());
+    } else {
+        recommendations.push(
+            "One or more hot-path stages are over budget; review recent policy or cache changes."
+                .to_string(),
+        );
+    }
+
+    if cache_hit_rate < 0.5 {
+        recommendations.push("Cache hit rate is low; review TTLs and warm-path traffic before tightening latency budgets further.".to_string());
+    } else {
+        recommendations.push(format!(
+            "Cache hit rate is {:.1}% across the current runtime window.",
+            cache_hit_rate * 100.0
+        ));
+    }
+
+    if snapshot.cache_miss_samples < 25 {
+        recommendations.push(
+            "Cache-miss sample volume is still low; continue soak testing for stronger confidence."
+                .to_string(),
+        );
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: LatencyBudgetStatus {
+            within_budget,
+            cache_hit_rate,
+            checks,
+            recommendations,
+        },
+    }))
+}
+
+fn latency_budget_check(
+    label: &str,
+    observed_ns: u64,
+    target_p50_ms: f64,
+    sample_count: u64,
+) -> LatencyBudgetCheck {
+    let observed_ms = observed_ns as f64 / 1_000_000.0;
+    let status = if sample_count == 0 {
+        "insufficient-data"
+    } else if observed_ms <= target_p50_ms {
+        "within-budget"
+    } else {
+        "over-budget"
+    };
+
+    LatencyBudgetCheck {
+        label: label.to_string(),
+        observed_ms,
+        target_p50_ms,
+        sample_count,
+        status: status.to_string(),
+    }
 }
 
 async fn runtime_snapshot(
@@ -4033,6 +4142,12 @@ fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
             cname_blocks_total: 0,
             queries_total: 0,
             blocked_total: 0,
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         },
         &snapshot,
         &state.runtime_guard,
@@ -5237,6 +5352,12 @@ mod tests {
             cname_blocks_total: 0,
             queries_total: 100,
             blocked_total: 10,
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         };
         let after = DnsRuntimeSnapshot {
             upstream_failures_total: 3,
@@ -5246,6 +5367,12 @@ mod tests {
             cname_blocks_total: 0,
             queries_total: 200,
             blocked_total: 20,
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         };
         let guard = RuntimeGuardConfig {
             probe_domains: vec!["example.com".to_string()],
@@ -5268,6 +5395,12 @@ mod tests {
             cname_blocks_total: 0,
             queries_total: 100,
             blocked_total: 10,
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         };
         let after = DnsRuntimeSnapshot {
             upstream_failures_total: 1,
@@ -5277,6 +5410,12 @@ mod tests {
             cname_blocks_total: 0,
             queries_total: 200,
             blocked_total: 15,
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         };
         let guard = RuntimeGuardConfig::default();
 
