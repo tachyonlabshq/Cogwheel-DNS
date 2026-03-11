@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
+import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -116,6 +116,13 @@ const emptyFederatedLearningSettings: FederatedLearningSettings = {
   recommendations: [],
 };
 
+const emptyLatencyBudget: LatencyBudgetStatus = {
+  within_budget: true,
+  cache_hit_rate: 0,
+  checks: [],
+  recommendations: [],
+};
+
 const emptyBlockProfileDraft: BlockProfileRecord = {
   id: "",
   emoji: "🧩",
@@ -134,6 +141,7 @@ export default function App() {
   const [tailscaleDnsCheck, setTailscaleDnsCheck] = useState<TailscaleDnsCheckResult>(emptyTailscaleDnsCheck);
   const [threatIntelSettings, setThreatIntelSettings] = useState<ThreatIntelSettings>(emptyThreatIntelSettings);
   const [federatedLearningSettings, setFederatedLearningSettings] = useState<FederatedLearningSettings>(emptyFederatedLearningSettings);
+  const [latencyBudget, setLatencyBudget] = useState<LatencyBudgetStatus>(emptyLatencyBudget);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -187,7 +195,7 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns, threatIntelData, federatedLearningData] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns, threatIntelData, federatedLearningData, latencyBudgetData] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
         api.syncStatus(),
@@ -195,6 +203,7 @@ export default function App() {
         api.tailscaleDnsCheck(),
         api.threatIntelProviders(),
         api.federatedLearningStatus(),
+        api.latencyBudget(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
@@ -203,6 +212,7 @@ export default function App() {
       localStorage.setItem("cogwheel_tailscale_dns_cache", JSON.stringify(tailscaleDns));
       localStorage.setItem("cogwheel_threat_intel_cache", JSON.stringify(threatIntelData));
       localStorage.setItem("cogwheel_federated_learning_cache", JSON.stringify(federatedLearningData));
+      localStorage.setItem("cogwheel_latency_budget_cache", JSON.stringify(latencyBudgetData));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setSyncStatus(syncStatusData);
@@ -210,6 +220,7 @@ export default function App() {
       setTailscaleDnsCheck(tailscaleDns);
       setThreatIntelSettings(threatIntelData);
       setFederatedLearningSettings(federatedLearningData);
+      setLatencyBudget(latencyBudgetData);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
@@ -219,8 +230,9 @@ export default function App() {
       const cachedTailscaleDns = localStorage.getItem("cogwheel_tailscale_dns_cache");
       const cachedThreatIntel = localStorage.getItem("cogwheel_threat_intel_cache");
       const cachedFederatedLearning = localStorage.getItem("cogwheel_federated_learning_cache");
+      const cachedLatencyBudget = localStorage.getItem("cogwheel_latency_budget_cache");
 
-      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns && cachedThreatIntel && cachedFederatedLearning) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns && cachedThreatIntel && cachedFederatedLearning && cachedLatencyBudget) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
@@ -229,6 +241,7 @@ export default function App() {
           setTailscaleDnsCheck(JSON.parse(cachedTailscaleDns) as TailscaleDnsCheckResult);
           setThreatIntelSettings(JSON.parse(cachedThreatIntel) as ThreatIntelSettings);
           setFederatedLearningSettings(JSON.parse(cachedFederatedLearning) as FederatedLearningSettings);
+          setLatencyBudget(JSON.parse(cachedLatencyBudget) as LatencyBudgetStatus);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -2715,6 +2728,40 @@ export default function App() {
                   <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">{tailscaleDnsCheck.message}</div>
                 ) : null}
               </div>
+            </div>
+            <div className="mt-4 rounded-[24px] border border-border/70 bg-muted/30 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium">Latency budgets</div>
+                  <div className="text-sm text-muted-foreground">Tracks the DNS hot path against the documented p50 budgets for cache hits, cache misses, and classifier work.</div>
+                </div>
+                <Badge>{latencyBudget.within_budget ? "Within budget" : "Needs attention"}</Badge>
+              </div>
+              <div className="mt-4 grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
+                <div className="rounded-2xl border border-border/70 bg-white/70 p-4 text-sm">
+                  <div className="text-muted-foreground">Current cache hit rate</div>
+                  <div className="mt-1 text-2xl font-semibold text-foreground">{(latencyBudget.cache_hit_rate * 100).toFixed(1)}%</div>
+                  <div className="mt-2 text-xs text-muted-foreground">Higher cache hit rates usually keep household traffic under the fastest path budget.</div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {latencyBudget.checks.map((check) => (
+                    <div key={check.label} className="rounded-2xl border border-border/70 bg-white/70 p-4 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium text-foreground">{check.label}</div>
+                        <Badge>{check.status}</Badge>
+                      </div>
+                      <div className="mt-3 text-lg font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Target p50 {check.target_p50_ms.toFixed(1)} ms</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Samples: {check.sample_count}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {latencyBudget.recommendations.length > 0 ? (
+                <div className="mt-4 rounded-2xl border border-dashed border-border/70 bg-background/80 p-4 text-sm text-muted-foreground">
+                  {latencyBudget.recommendations.join(" ")}
+                </div>
+              ) : null}
             </div>
           </Card>
 

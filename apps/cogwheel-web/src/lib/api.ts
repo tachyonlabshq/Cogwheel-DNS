@@ -263,6 +263,21 @@ export type FalsePositiveBudgetStatus = {
   recommendations: string[];
 };
 
+export type LatencyBudgetCheck = {
+  label: string;
+  observed_ms: number;
+  target_p50_ms: number;
+  sample_count: number;
+  status: string;
+};
+
+export type LatencyBudgetStatus = {
+  within_budget: boolean;
+  cache_hit_rate: number;
+  checks: LatencyBudgetCheck[];
+  recommendations: string[];
+};
+
 export type ConfigVersionStatus = {
   schema_version: number;
   config_version: number;
@@ -474,6 +489,7 @@ export const api = {
   tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
   falsePositiveBudget: () =>
     fetchJson<FalsePositiveBudgetStatus>("/api/v1/false-positive-budget"),
+  latencyBudget: () => fetchJson<LatencyBudgetStatus>("/api/v1/latency-budget"),
   runLoadTest: (duration_secs: number, qps: number, cache_hit_ratio: number) =>
     fetchJson<LoadTestResult>("/api/v1/load-test", {
       method: "POST",

@@ -332,7 +332,7 @@ Exit criteria:
 ## Cross-Phase Quality Gates
 
 - [ ] Keep DNS hot path deterministic and LLM-independent.
-- [ ] Track latency budgets for cache hit/miss and classifier processing.
+- [x] Track latency budgets for cache hit/miss and classifier processing.
 - [ ] Enforce audit logging on every policy-changing action.
 - [x] Require rollback path for every deployment-affecting feature.
 - [ ] Keep default user-facing settings minimal and understandable.

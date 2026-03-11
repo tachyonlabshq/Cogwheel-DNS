@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -85,6 +86,12 @@ pub struct DnsRuntimeStats {
     cname_blocks_total: AtomicU64,
     queries_total: AtomicU64,
     blocked_total: AtomicU64,
+    cache_hit_latency_total_ns: AtomicU64,
+    cache_hit_samples: AtomicU64,
+    cache_miss_latency_total_ns: AtomicU64,
+    cache_miss_samples: AtomicU64,
+    classifier_latency_total_ns: AtomicU64,
+    classifier_latency_samples: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -96,6 +103,12 @@ pub struct DnsRuntimeSnapshot {
     pub cname_blocks_total: u64,
     pub queries_total: u64,
     pub blocked_total: u64,
+    pub cache_hit_latency_avg_ns: u64,
+    pub cache_hit_samples: u64,
+    pub cache_miss_latency_avg_ns: u64,
+    pub cache_miss_samples: u64,
+    pub classifier_latency_avg_ns: u64,
+    pub classifier_latency_samples: u64,
 }
 
 impl DnsRuntime {
@@ -186,6 +199,12 @@ impl DnsRuntime {
     }
 
     pub fn snapshot(&self) -> DnsRuntimeSnapshot {
+        let cache_hit_samples = self.stats.cache_hit_samples.load(Ordering::Relaxed);
+        let cache_miss_samples = self.stats.cache_miss_samples.load(Ordering::Relaxed);
+        let classifier_samples = self
+            .stats
+            .classifier_latency_samples
+            .load(Ordering::Relaxed);
         DnsRuntimeSnapshot {
             upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
@@ -194,6 +213,21 @@ impl DnsRuntime {
             cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
             queries_total: self.stats.queries_total.load(Ordering::Relaxed),
             blocked_total: self.stats.blocked_total.load(Ordering::Relaxed),
+            cache_hit_latency_avg_ns: average_atomic_ns(
+                &self.stats.cache_hit_latency_total_ns,
+                cache_hit_samples,
+            ),
+            cache_hit_samples,
+            cache_miss_latency_avg_ns: average_atomic_ns(
+                &self.stats.cache_miss_latency_total_ns,
+                cache_miss_samples,
+            ),
+            cache_miss_samples,
+            classifier_latency_avg_ns: average_atomic_ns(
+                &self.stats.classifier_latency_total_ns,
+                classifier_samples,
+            ),
+            classifier_latency_samples: classifier_samples,
         }
     }
 
@@ -270,6 +304,7 @@ impl DnsRuntime {
         client_addr: Option<SocketAddr>,
     ) -> Result<Message> {
         self.stats.queries_total.fetch_add(1, Ordering::Relaxed);
+        let query_start = Instant::now();
         let request = Message::from_vec(payload)?;
         let query = request
             .queries()
@@ -280,12 +315,14 @@ impl DnsRuntime {
         let domain = name.trim_end_matches('.').to_ascii_lowercase();
 
         let classifier_settings = self.classifier_settings();
+        let classifier_start = Instant::now();
         if let Some(classification) = classify_domain(&domain, &classifier_settings) {
             tracing::debug!(domain, score = classification.score, "domain classified");
             if classification.score >= classifier_settings.threshold {
                 self.emit_classification_event(&domain, client_addr, classification);
             }
         }
+        self.record_classifier_latency(classifier_start.elapsed().as_nanos());
 
         let (engine, cache_scope, forced_block_mode) = self.policy_for_client(client_addr, &domain);
         let cache_key = policy_cache_key(&cache_scope, &domain);
@@ -293,6 +330,7 @@ impl DnsRuntime {
         if let Some(cached) = self.cache.get(&cache_key).await {
             self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
             self.emit_query_activity(&domain, client_addr, cached.blocked);
+            self.record_cache_hit_latency(query_start.elapsed().as_nanos());
             return Ok(response_for_request(&request, &cached.response));
         }
 
@@ -309,6 +347,7 @@ impl DnsRuntime {
                 )
                 .await;
             self.emit_query_activity(&domain, client_addr, true);
+            self.record_cache_miss_latency(query_start.elapsed().as_nanos());
             return Ok(response);
         }
         let decision = engine.evaluate(&domain);
@@ -338,6 +377,7 @@ impl DnsRuntime {
                             )
                             .await;
                         self.emit_query_activity(&domain, client_addr, true);
+                        self.record_cache_miss_latency(query_start.elapsed().as_nanos());
                         return Ok(response);
                     }
                 }
@@ -383,7 +423,33 @@ impl DnsRuntime {
             )
             .await;
         self.emit_query_activity(&domain, client_addr, blocked);
+        self.record_cache_miss_latency(query_start.elapsed().as_nanos());
         Ok(response)
+    }
+
+    fn record_classifier_latency(&self, elapsed_ns: u128) {
+        self.stats
+            .classifier_latency_total_ns
+            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
+        self.stats
+            .classifier_latency_samples
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_cache_hit_latency(&self, elapsed_ns: u128) {
+        self.stats
+            .cache_hit_latency_total_ns
+            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
+        self.stats.cache_hit_samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_cache_miss_latency(&self, elapsed_ns: u128) {
+        self.stats
+            .cache_miss_latency_total_ns
+            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
+        self.stats
+            .cache_miss_samples
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn emit_classification_event(
@@ -626,6 +692,18 @@ fn response_for_request(request: &Message, cached: &Message) -> Message {
     response
 }
 
+fn saturating_ns(elapsed_ns: u128) -> u64 {
+    elapsed_ns.min(u64::MAX as u128) as u64
+}
+
+fn average_atomic_ns(total: &AtomicU64, samples: u64) -> u64 {
+    if samples == 0 {
+        0
+    } else {
+        total.load(Ordering::Relaxed) / samples
+    }
+}
+
 fn error_response_for_payload(payload: &[u8]) -> Message {
     match Message::from_vec(payload) {
         Ok(request) => Message::error_msg(request.id(), request.op_code(), ResponseCode::ServFail),
@@ -698,6 +776,12 @@ mod tests {
             cname_blocks_total: stats.cname_blocks_total.load(Ordering::Relaxed),
             queries_total: stats.queries_total.load(Ordering::Relaxed),
             blocked_total: stats.blocked_total.load(Ordering::Relaxed),
+            cache_hit_latency_avg_ns: 0,
+            cache_hit_samples: 0,
+            cache_miss_latency_avg_ns: 0,
+            cache_miss_samples: 0,
+            classifier_latency_avg_ns: 0,
+            classifier_latency_samples: 0,
         };
         assert_eq!(
             snapshot,
@@ -709,6 +793,12 @@ mod tests {
                 cname_blocks_total: 0,
                 queries_total: 0,
                 blocked_total: 0,
+                cache_hit_latency_avg_ns: 0,
+                cache_hit_samples: 0,
+                cache_miss_latency_avg_ns: 0,
+                cache_miss_samples: 0,
+                classifier_latency_avg_ns: 0,
+                classifier_latency_samples: 0,
             }
         );
     }
