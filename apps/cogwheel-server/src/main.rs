@@ -714,7 +714,9 @@ fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
 }
 
 fn build_http_app(app_state: ServerState) -> Router {
-    let api_app = router(app_state.clone()).merge(admin_router());
+    let api_app = router(app_state.clone())
+        .merge(admin_router())
+        .route("/favicon.ico", get(favicon));
 
     let app = if let Some(web_dist_dir) = resolve_web_dist_dir() {
         tracing::info!(path = %web_dist_dir.display(), "serving bundled web assets");
@@ -3118,8 +3120,9 @@ fn latency_budget_check(
 
 async fn resolver_access_status(
     State(state): State<ServerState>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<ResolverAccessStatus>>, axum::http::StatusCode> {
-    let dns_targets = discover_dns_targets(state.dns_udp_bind_addr);
+    let dns_targets = discover_dns_targets(state.dns_udp_bind_addr, &headers);
     let tailscale_ip = discover_tailscale_ipv4();
     let hostname = std::env::var("HOSTNAME")
         .ok()
@@ -3146,13 +3149,24 @@ async fn resolver_access_status(
     }))
 }
 
-fn discover_dns_targets(bind_addr: SocketAddr) -> Vec<String> {
+fn discover_dns_targets(bind_addr: SocketAddr, headers: &HeaderMap) -> Vec<String> {
     let port = bind_addr.port();
     let mut targets = Vec::new();
 
+    if let Some(host) = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(':').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
+    {
+        targets.push(format!("{}:{}", host, port));
+    }
+
     if bind_addr.ip().is_unspecified() {
         for ip in discover_local_ipv4s() {
-            targets.push(format!("{}:{}", ip, port));
+            if !ip.starts_with("172.") {
+                targets.push(format!("{}:{}", ip, port));
+            }
         }
     } else {
         targets.push(format!("{}:{}", bind_addr.ip(), port));
@@ -3203,6 +3217,10 @@ fn discover_tailscale_ipv4() -> Option<String> {
             .find(|line| line.parse::<std::net::Ipv4Addr>().is_ok())
             .map(ToString::to_string)
     })
+}
+
+async fn favicon() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
 }
 
 fn read_command_output(command: &str, args: &[&str]) -> Option<String> {
