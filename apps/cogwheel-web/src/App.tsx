@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { RefreshCw, Undo2 } from "lucide-react";
 import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -154,25 +154,19 @@ export default function App() {
   const [blocklistProfile, setBlocklistProfile] = useState("custom");
   const [blocklistStrictness, setBlocklistStrictness] = useState<"strict" | "balanced" | "relaxed">("balanced");
   const [blocklistInterval, setBlocklistInterval] = useState("60");
-  const [editingBlocklistId, setEditingBlocklistId] = useState<string | null>(null);
 
   const [classifierThreshold, setClassifierThreshold] = useState("0.92");
   const [notificationEnabled, setNotificationEnabled] = useState(false);
   const [notificationWebhookUrl, setNotificationWebhookUrl] = useState("");
   const [notificationMinSeverity, setNotificationMinSeverity] = useState<"medium" | "high" | "critical">("high");
-  const [notificationTestDomain, setNotificationTestDomain] = useState("notification-test.cogwheel.local");
+  const [notificationTestDomain] = useState("notification-test.cogwheel.local");
   const [notificationTestSeverity, setNotificationTestSeverity] = useState<"medium" | "high" | "critical">("high");
-  const [notificationTestDeviceName, setNotificationTestDeviceName] = useState("Control Plane Test");
-  const [notificationDryRun, setNotificationDryRun] = useState(false);
-  const [notificationPresetName, setNotificationPresetName] = useState("");
-  const [selectedNotificationPreset, setSelectedNotificationPreset] = useState("");
-  const [notificationAnalyticsWindow, setNotificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
-  const [notificationHistoryWindow, setNotificationHistoryWindow] = useState<10 | 30 | 50 | 100>(10);
-  const [serviceSearch, setServiceSearch] = useState("");
+  const [notificationTestDeviceName] = useState("Control Plane Test");
+  const [notificationDryRun] = useState(false);
+  const [notificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
+  const [notificationHistoryWindow] = useState<10 | 30 | 50 | 100>(10);
+  const [serviceSearch] = useState("");
   const [auditEventFilter, setAuditEventFilter] = useState<"all" | "runtime" | "notifications" | "devices" | "rulesets">("all");
-  const [notificationDeliveryFilter, setNotificationDeliveryFilter] = useState<"all" | "failed" | "security" | "control-plane">("all");
-
-  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [showServicesView, setShowServicesView] = useState(false);
   const [syncProfileDraft, setSyncProfileDraft] = useState("full");
   const [syncTransportModeDraft, setSyncTransportModeDraft] = useState("opportunistic");
@@ -278,17 +272,6 @@ export default function App() {
   }, [syncStatus.profile, syncStatus.transport_mode]);
 
   useEffect(() => {
-    if (!selectedNotificationPreset) return;
-    const preset = settings.notification_test_presets.find((item) => item.name === selectedNotificationPreset);
-    if (!preset) return;
-    setNotificationPresetName(preset.name);
-    setNotificationTestDomain(preset.domain);
-    setNotificationTestSeverity(preset.severity);
-    setNotificationTestDeviceName(preset.device_name);
-    setNotificationDryRun(preset.dry_run);
-  }, [selectedNotificationPreset, settings.notification_test_presets]);
-
-  useEffect(() => {
     const selectedProfile = settings.block_profiles.find((profile) => profile.id === selectedBlockProfileId);
     if (selectedProfile) {
       setBlockProfileDraft(selectedProfile);
@@ -357,17 +340,6 @@ export default function App() {
       return true;
     }),
     [auditEventFilter, dashboard.latest_audit_events],
-  );
-
-  const filteredNotificationDeliveries = useMemo(
-    () => dashboard.recent_notification_deliveries.filter((delivery) => {
-      if (notificationDeliveryFilter === "all") return true;
-      if (notificationDeliveryFilter === "failed") return delivery.status === "failed";
-      if (notificationDeliveryFilter === "security") return delivery.event_type.startsWith("security.");
-      if (notificationDeliveryFilter === "control-plane") return !delivery.event_type.startsWith("security.");
-      return true;
-    }),
-    [dashboard.recent_notification_deliveries, notificationDeliveryFilter],
   );
 
   const controlPlaneStatus = useMemo(() => {
@@ -715,59 +687,6 @@ export default function App() {
     }
   }
 
-  async function handleNotificationPresetSave() {
-    if (!notificationPresetName.trim()) {
-      pushToast("Preset name required", "Name the preset before saving it.", "error");
-      return;
-    }
-
-    setBusyAction("notifications-preset-save");
-    try {
-      const nextPresets = settings.notification_test_presets.filter(
-        (preset) => preset.name !== notificationPresetName.trim(),
-      );
-      nextPresets.push({
-        name: notificationPresetName.trim(),
-        domain: notificationTestDomain,
-        severity: notificationTestSeverity,
-        device_name: notificationTestDeviceName,
-        dry_run: notificationDryRun,
-      });
-      nextPresets.sort((left, right) => left.name.localeCompare(right.name));
-      await api.updateNotificationTestPresets(nextPresets);
-      setSelectedNotificationPreset(notificationPresetName.trim());
-      pushToast("Preset saved", `Stored ${notificationPresetName.trim()} for future tests.`, "success");
-      await load();
-    } catch (mutationError) {
-      pushToast("Preset save failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function handleNotificationPresetDelete() {
-    if (!selectedNotificationPreset) {
-      pushToast("Preset required", "Select a saved preset before deleting it.", "error");
-      return;
-    }
-
-    setBusyAction("notifications-preset-delete");
-    try {
-      const nextPresets = settings.notification_test_presets.filter(
-        (preset) => preset.name !== selectedNotificationPreset,
-      );
-      await api.updateNotificationTestPresets(nextPresets);
-      pushToast("Preset deleted", `${selectedNotificationPreset} was removed.`, "success");
-      setSelectedNotificationPreset("");
-      setNotificationPresetName("");
-      await load();
-    } catch (mutationError) {
-      pushToast("Preset delete failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function handleTailscaleExitNodeToggle() {
     const newState = !tailscaleStatus.exit_node_active;
     setBusyAction("tailscale-exit-node");
@@ -975,29 +894,6 @@ export default function App() {
     }
   }
 
-  async function handleBlocklistEdit(source: SettingsSummary["blocklists"][number]) {
-    setBusyAction(`blocklist-save-${source.id}`);
-    try {
-      await api.upsertBlocklist({
-        id: source.id,
-        name: source.name,
-        url: source.url,
-        kind: source.kind,
-        enabled: source.enabled,
-        refresh_interval_minutes: source.refresh_interval_minutes,
-        profile: source.profile,
-        verification_strictness: source.verification_strictness,
-      });
-      setEditingBlocklistId(null);
-      pushToast("Blocklist updated", `${source.name} metadata was saved.`, "success");
-      await load();
-    } catch (mutationError) {
-      pushToast("Blocklist update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function handleBlocklistToggle(id: string, enabled: boolean) {
     setBusyAction(`blocklist-toggle-${id}`);
     try {
@@ -1006,19 +902,6 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Blocklist update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function handleBlocklistDelete(id: string) {
-    setBusyAction(`blocklist-delete-${id}`);
-    try {
-      await api.deleteBlocklist(id);
-      pushToast("Blocklist deleted", "The source was removed and refresh requested.", "success");
-      await load();
-    } catch (mutationError) {
-      pushToast("Blocklist delete failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -1248,23 +1131,17 @@ export default function App() {
           </Card>
         </section>
 
-      <section className="hidden grid gap-6 lg:grid-cols-[1fr_1fr]">
+      {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
+
+      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
         <Card id="guided-recovery">
-          <CardTitle>Guided recovery</CardTitle>
-          <CardDescription>Plain-language next steps for the issues most likely to block protection or visibility.</CardDescription>
+          <CardTitle>Quick actions</CardTitle>
+          <CardDescription>Only the most relevant recovery and maintenance actions stay on the overview page.</CardDescription>
           <div className="mt-5 grid gap-3">
-            {recoveryActions.map((item) => (
+            {recoveryActions.slice(0, 2).map((item) => (
               <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
                 <div className="font-medium">{item.title}</div>
                 <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
-                <div className="mt-3 grid gap-2 text-sm text-muted-foreground">
-                  {item.steps.map((step, index) => (
-                    <div key={step} className="flex gap-3 rounded-2xl bg-muted/40 px-3 py-2">
-                      <span className="font-medium text-foreground">{index + 1}</span>
-                      <span>{step}</span>
-                    </div>
-                  ))}
-                </div>
                 <div className="mt-3">
                   <Button
                     variant="secondary"
@@ -1272,10 +1149,6 @@ export default function App() {
                     onClick={() => {
                       if (item.actionKey === "runtime-health-check") {
                         void handleRuntimeHealthCheck();
-                        return;
-                      }
-                      if (item.actionKey === "notifications") {
-                        setAuditEventFilter("notifications");
                         return;
                       }
                       if (item.actionKey === "rollback-ruleset") {
@@ -1294,839 +1167,56 @@ export default function App() {
           </div>
         </Card>
 
-        <Card id="setup-checklist">
-          <CardTitle>Moved out of overview</CardTitle>
-          <CardDescription>Device setup, syncing, recovery, and operator controls now live in their dedicated pages to keep the dashboard light.</CardDescription>
-          <div className="mt-5 rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
-            Use the pill navigation above to jump directly into block profiles, devices, or settings when you want to make changes.
-          </div>
-        </Card>
-      </section>
-
-      {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
-
-      <section className="hidden grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-        <Card id="dashboard-summary">
-          <CardTitle>Dashboard</CardTitle>
-          <CardDescription>Current backend summary surfaced in a UI-first shape.</CardDescription>
-          <div className="mt-6 space-y-4">
+        <Card>
+          <CardTitle>Resolver summary</CardTitle>
+          <CardDescription>Small operational details that are still useful on the main dashboard.</CardDescription>
+          <div className="mt-5 grid gap-3 text-sm">
             <Row label="Protection" value={dashboard.protection_status} />
             <Row label="Active ruleset" value={dashboard.active_ruleset?.hash.slice(0, 12) ?? "None"} />
-            <Row label="Fallback served" value={String(dashboard.runtime_health.snapshot.fallback_served_total)} />
             <Row label="Cache hits" value={String(dashboard.runtime_health.snapshot.cache_hits_total)} />
-            <Row label="Probe domains" value={settings.runtime_guard.probe_domains.join(", ") || "None"} />
-          </div>
-          <Separator className="my-6" />
-          <div className="space-y-3">
-            <div className="font-medium">Alert posture</div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Metric label="Critical" value={String(dashboard.security_summary.critical_count)} icon={<ShieldCheck className="size-4" />} />
-              <Metric label="High" value={String(dashboard.security_summary.high_count)} icon={<Activity className="size-4" />} />
-              <Metric label="Medium" value={String(dashboard.security_summary.medium_count)} icon={<Sparkles className="size-4" />} />
-            </div>
-            <div className="grid gap-3">
-              {dashboard.security_summary.top_devices.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                  No devices are currently trending for risky activity.
-                </div>
-              ) : (
-                dashboard.security_summary.top_devices.map((device) => (
-                  <div key={device.label} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">{device.label}</div>
-                      <Badge>{device.highest_severity}</Badge>
-                    </div>
-                    <div className="mt-1 text-muted-foreground">{device.event_count} recent risky requests in the current alert window.</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-          <Separator className="my-6" />
-          <div className="space-y-3">
-            <div className="font-medium">Recent risky events</div>
-            <div className="grid gap-3">
-              {dashboard.recent_security_events.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                  No risky DNS events recorded yet.
-                </div>
-              ) : (
-                dashboard.recent_security_events.map((event) => (
-                  <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">{event.domain}</div>
-                      <Badge>{event.severity}</Badge>
-                    </div>
-                    <div className="mt-1 text-muted-foreground">
-                      {(event.device_name ?? "Unassigned device")} on {event.client_ip} - classifier {event.classifier_score.toFixed(2)}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </Card>
-
-        <Card id="settings">
-          <CardTitle>Settings</CardTitle>
-          <CardDescription>Classifier and blocklist controls map directly to the backend endpoints.</CardDescription>
-          <div className="mt-6 space-y-5">
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">Classifier mode</div>
-                  <div className="text-sm text-muted-foreground">Persisted directly in the backend control plane.</div>
-                </div>
-                <Badge>{settings.classifier.mode}</Badge>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {(["Off", "Monitor", "Protect"] as const).map((mode) => (
-                  <Button
-                    key={mode}
-                    variant={settings.classifier.mode === mode ? "primary" : "secondary"}
-                    size="sm"
-                    onClick={() => void handleClassifierUpdate(mode)}
-                    disabled={busyAction === `classifier-mode-${mode}`}
-                  >
-                    {mode}
-                  </Button>
-                ))}
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                <Input value={classifierThreshold} onChange={(event) => setClassifierThreshold(event.target.value)} placeholder="0.92" />
-                <Button variant="secondary" onClick={() => void handleClassifierThresholdSave()} disabled={busyAction === "classifier-threshold"}>
-                  Save threshold
-                </Button>
-              </div>
-            </section>
-
-            <Separator />
-
-            {showAdvancedSettings ? (
-              <section className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-medium">Alert delivery</div>
-                    <div className="text-sm text-muted-foreground">Send high-severity security alerts to an external webhook.</div>
-                  </div>
-                  <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
-                </div>
-                <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
-                  <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
-                  Enable outbound alert notifications
-                </label>
-                <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
-                  <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
-                    <option value="medium">Medium+</option>
-                    <option value="high">High+</option>
-                    <option value="critical">Critical only</option>
-                  </select>
-                  <div className="flex gap-2">
-                    <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
-                      Save alerts
-                    </Button>
-                    <Button variant="ghost" onClick={() => void handleNotificationTest()} disabled={busyAction === "notifications-test" || !notificationWebhookUrl}>
-                      Send test
-                    </Button>
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="grid gap-2 text-sm text-muted-foreground">
-                    <span>Notification analytics window</span>
-                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
-                      <option value="10">Last 10 events</option>
-                      <option value="30">Last 30 events</option>
-                      <option value="50">Last 50 events</option>
-                      <option value="100">Last 100 events</option>
-                    </select>
-                  </label>
-                  <label className="grid gap-2 text-sm text-muted-foreground">
-                    <span>Delivery history window</span>
-                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationHistoryWindow} onChange={(event) => setNotificationHistoryWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
-                      <option value="10">Last 10 events</option>
-                      <option value="30">Last 30 events</option>
-                      <option value="50">Last 50 events</option>
-                      <option value="100">Last 100 events</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
-                  <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationTestSeverity} onChange={(event) => setNotificationTestSeverity(event.target.value as "medium" | "high" | "critical") }>
-                    <option value="medium">Medium test</option>
-                    <option value="high">High test</option>
-                    <option value="critical">Critical test</option>
-                  </select>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto_auto]">
-                  <Input value={notificationPresetName} onChange={(event) => setNotificationPresetName(event.target.value)} placeholder="weekday-health-check" />
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={selectedNotificationPreset} onChange={(event) => setSelectedNotificationPreset(event.target.value)}>
-                    <option value="">Load saved preset</option>
-                    {settings.notification_test_presets.map((preset) => (
-                      <option key={preset.name} value={preset.name}>{preset.name}</option>
-                    ))}
-                  </select>
-                  <Button variant="ghost" onClick={() => void handleNotificationPresetSave()} disabled={busyAction === "notifications-preset-save"}>
-                    Save preset
-                  </Button>
-                  <Button variant="ghost" onClick={() => void handleNotificationPresetDelete()} disabled={busyAction === "notifications-preset-delete" || !selectedNotificationPreset}>
-                    Delete preset
-                  </Button>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <Input value={notificationTestDeviceName} onChange={(event) => setNotificationTestDeviceName(event.target.value)} placeholder="Control Plane Test" />
-                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
-                    <input type="checkbox" checked={notificationDryRun} onChange={(event) => setNotificationDryRun(event.target.checked)} />
-                    Validate only
-                  </label>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                    <div className="text-muted-foreground">Delivered</div>
-                    <div className="mt-1 font-medium">{dashboard.notification_health.delivered_count}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Last success: {dashboard.notification_health.last_delivery_at ? new Date(dashboard.notification_health.last_delivery_at).toLocaleString() : "none yet"}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                    <div className="text-muted-foreground">Failed</div>
-                    <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Last failure: {dashboard.notification_health.last_failure_at ? new Date(dashboard.notification_health.last_failure_at).toLocaleString() : "none yet"}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                    <div className="text-muted-foreground">Success rate</div>
-                    <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
-                    {dashboard.recent_notification_deliveries.length > 0 ? (
-                      <div className="mt-2 flex items-end gap-[2px] h-6 w-full">
-                        {[...dashboard.recent_notification_deliveries].reverse().map((d, i) => (
-                          <div key={i} title={`${new Date(d.created_at).toLocaleTimeString()}: ${d.status}`} className={`flex-1 max-w-[8px] rounded-[1px] ${d.status === "delivered" ? "bg-emerald-500/60 h-full" : "bg-destructive/80 h-3"}`} />
-                        ))}
-                      </div>
-                    ) : null}
-                    <div className="mt-2 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
-                  </div>
-                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                    <div className="text-muted-foreground">Top failed domains</div>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {dashboard.notification_failure_analytics.top_failed_domains.length === 0 ? (
-                        <span className="text-xs text-muted-foreground">No failed domains in the recent window.</span>
-                      ) : (
-                        dashboard.notification_failure_analytics.top_failed_domains.map((domain) => (
-                          <Badge key={domain.domain}>{domain.domain} x{domain.failure_count}</Badge>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        ["all", "All"],
-                        ["failed", "Failed"],
-                        ["security", "Security"],
-                        ["control-plane", "Control plane"],
-                      ].map(([value, label]) => (
-                        <Button key={value} variant={notificationDeliveryFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setNotificationDeliveryFilter(value as "all" | "failed" | "security" | "control-plane")}>
-                          {label}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid gap-3">
-                  {filteredNotificationDeliveries.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                      No recent notification deliveries match the selected history filter.
-                    </div>
-                  ) : (
-                    filteredNotificationDeliveries.map((delivery) => (
-                      <div key={`${delivery.created_at}-${delivery.title}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <div className="font-medium">{delivery.title}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">{delivery.target}</div>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <Badge>{delivery.status}</Badge>
-                            <Badge>{delivery.event_type}</Badge>
-                          </div>
-                        </div>
-                        <div className="mt-1 text-muted-foreground">{delivery.summary}</div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </section>
-            ) : (
-              <div className="flex justify-center">
-                <Button variant="ghost" onClick={() => setShowAdvancedSettings(true)}>
-                  Show advanced settings
-                </Button>
-              </div>
-            )}
-
-            <Separator />
-
-            <section className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">Optional intelligence feeds</div>
-                  <div className="text-sm text-muted-foreground">Keep enrichment providers off the DNS hot path and enable them only when you need added context.</div>
-                </div>
-                <Badge>{threatIntelSettings.providers.filter((provider) => provider.enabled).length} enabled</Badge>
-              </div>
-              <div className="grid gap-3">
-                {threatIntelSettings.providers.map((provider) => (
-                  <div key={provider.id} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium">{provider.display_name}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">{provider.capabilities.join(" • ")}</div>
-                      </div>
-                      <Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>
-                    </div>
-                    <label className="mt-3 flex items-center gap-3 rounded-2xl border border-border/70 bg-background/80 px-4 py-3 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={provider.enabled}
-                        onChange={(event) =>
-                          setThreatIntelSettings((current) => ({
-                            ...current,
-                            providers: current.providers.map((item) =>
-                              item.id === provider.id ? { ...item, enabled: event.target.checked } : item,
-                            ),
-                          }))
-                        }
-                      />
-                      Enable provider
-                    </label>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_180px_auto]">
-                      <Input
-                        value={provider.feed_url ?? ""}
-                        onChange={(event) =>
-                          setThreatIntelSettings((current) => ({
-                            ...current,
-                            providers: current.providers.map((item) =>
-                              item.id === provider.id ? { ...item, feed_url: event.target.value || null } : item,
-                            ),
-                          }))
-                        }
-                        placeholder="https://feed.example.invalid/dns"
-                      />
-                      <Input
-                        value={String(provider.update_interval_minutes)}
-                        onChange={(event) => {
-                          const nextValue = Number.parseInt(event.target.value, 10);
-                          setThreatIntelSettings((current) => ({
-                            ...current,
-                            providers: current.providers.map((item) =>
-                              item.id === provider.id
-                                ? { ...item, update_interval_minutes: Number.isNaN(nextValue) ? item.update_interval_minutes : nextValue }
-                                : item,
-                            ),
-                          }));
-                        }}
-                        placeholder="60"
-                      />
-                      <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>
-                        {busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}
-                      </Button>
-                    </div>
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      API key configured: {provider.api_key_configured ? "yes" : "no"}
-                      {provider.last_sync_at ? ` • Last sync ${new Date(provider.last_sync_at).toLocaleString()}` : " • No sync yet"}
-                    </div>
-                    {provider.last_error ? <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{provider.last_error}</div> : null}
-                  </div>
-                ))}
-              </div>
-              {threatIntelSettings.recommendations.length > 0 ? (
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
-                  {threatIntelSettings.recommendations.join(" ")}
-                </div>
-              ) : null}
-            </section>
-
-            <Separator />
-
-            <section className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">Federated learning</div>
-                  <div className="text-sm text-muted-foreground">Share model updates only. Raw logs stay local to preserve the default privacy boundary.</div>
-                </div>
-                <Badge>{federatedLearningSettings.enabled ? federatedLearningSettings.privacy_mode : "Disabled"}</Badge>
-              </div>
-              <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
-                <input
-                  type="checkbox"
-                  checked={federatedLearningSettings.enabled}
-                  onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, enabled: event.target.checked }))}
-                />
-                Enable federated learning coordinator sync
-              </label>
-              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
-                <Input
-                  value={federatedLearningSettings.coordinator_url ?? ""}
-                  onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, coordinator_url: event.target.value || null }))}
-                  placeholder="https://coordinator.example.invalid"
-                />
-                <Input
-                  value={String(federatedLearningSettings.round_interval_hours)}
-                  onChange={(event) => {
-                    const nextValue = Number.parseInt(event.target.value, 10);
-                    setFederatedLearningSettings((current) => ({
-                      ...current,
-                      round_interval_hours: Number.isNaN(nextValue) ? current.round_interval_hours : nextValue,
-                    }));
-                  }}
-                  placeholder="24"
-                />
-                <Button variant="secondary" onClick={() => void handleFederatedLearningSave()} disabled={busyAction === "federated-learning-save"}>
-                  {busyAction === "federated-learning-save" ? "Saving..." : "Save"}
-                </Button>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Node id</div>
-                  <div className="mt-1 font-medium">{federatedLearningSettings.node_id || "Pending"}</div>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Last round</div>
-                  <div className="mt-1 font-medium">{federatedLearningSettings.last_round_at ? new Date(federatedLearningSettings.last_round_at).toLocaleString() : "Not started"}</div>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Raw log export</div>
-                  <div className="mt-1 font-medium">{federatedLearningSettings.raw_log_export_enabled ? "Enabled" : "Disabled"}</div>
-                </div>
-              </div>
-              {federatedLearningSettings.recommendations.length > 0 ? (
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
-                  {federatedLearningSettings.recommendations.join(" ")}
-                </div>
-              ) : null}
-            </section>
-
-            <Separator />
-
-            <section className="space-y-3">
-              <div className="font-medium">Add blocklist</div>
-              <div className="grid gap-3">
-                <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
-                <Input value={blocklistUrl} onChange={(event) => setBlocklistUrl(event.target.value)} placeholder="Source URL or data: URL" />
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
-                    <option value="custom">Custom</option>
-                    <option value="essential">Essential</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="aggressive">Aggressive</option>
-                  </select>
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistStrictness} onChange={(event) => setBlocklistStrictness(event.target.value as "strict" | "balanced" | "relaxed")}>
-                    <option value="strict">Strict</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="relaxed">Relaxed</option>
-                  </select>
-                  <Input value={blocklistInterval} onChange={(event) => setBlocklistInterval(event.target.value)} placeholder="Refresh minutes" />
-                </div>
-                <Button onClick={() => void handleBlocklistCreate()} disabled={!blocklistName || !blocklistUrl || busyAction === "create-blocklist"}>
-                  Add blocklist
-                </Button>
-              </div>
-            </section>
+            <Row label="Fallback served" value={String(dashboard.runtime_health.snapshot.fallback_served_total)} />
+            <Row label="Runtime notes" value={String(dashboard.runtime_health.notes.length)} />
           </div>
         </Card>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-2">
-        <Card id="blocklists">
-          <CardTitle>Blocklists</CardTitle>
-          <CardDescription>Schedule, profile, strictness, and refresh status are backend-driven.</CardDescription>
+      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+        <Card>
+          <CardTitle>Recent risky events</CardTitle>
+          <CardDescription>Newest high-signal security events without pulling in device management controls.</CardDescription>
           <div className="mt-5 grid gap-3">
-            {settings.blocklists.map((source) => {
-              const status = settings.blocklist_statuses.find((entry) => entry.id === source.id);
-              return (
-                <div key={source.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-medium">{source.name}</div>
-                      <div className="text-sm text-muted-foreground">{source.url}</div>
-                    </div>
-                    <Badge className={source.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{source.enabled ? "Enabled" : "Disabled"}</Badge>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                    <Badge>{source.profile}</Badge>
-                    <Badge>{source.verification_strictness}</Badge>
-                    <Badge>{source.refresh_interval_minutes}m</Badge>
-                    <Badge>{status?.due_for_refresh ? "Due" : "Fresh"}</Badge>
-                  </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <Button variant="ghost" size="sm" onClick={() => setEditingBlocklistId(editingBlocklistId === source.id ? null : source.id)}>
-                      {editingBlocklistId === source.id ? "Close" : "Edit"}
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => void handleBlocklistToggle(source.id, !source.enabled)} disabled={busyAction === `blocklist-toggle-${source.id}`}>
-                      {source.enabled ? "Disable" : "Enable"}
-                    </Button>
-                    {source.name !== "baseline" ? (
-                      <Button variant="ghost" size="sm" onClick={() => void handleBlocklistDelete(source.id)} disabled={busyAction === `blocklist-delete-${source.id}`}>
-                        Delete
-                      </Button>
-                    ) : null}
-                  </div>
-                  {editingBlocklistId === source.id ? (
-                    <div className="mt-4 grid gap-3 rounded-[20px] border border-border/70 bg-muted/40 p-4">
-                      <Input value={source.name} readOnly />
-                      <Input value={source.url} readOnly />
-                      <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
-                        <label className="grid gap-1">
-                          <span>Profile</span>
-                          <select
-                            className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm"
-                            value={source.profile}
-                            onChange={(event) => {
-                              setSettings((current) => ({
-                                ...current,
-                                blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, profile: event.target.value } : item),
-                              }));
-                            }}
-                          >
-                            <option value="essential">Essential</option>
-                            <option value="balanced">Balanced</option>
-                            <option value="aggressive">Aggressive</option>
-                            <option value="custom">Custom</option>
-                          </select>
-                        </label>
-                        <label className="grid gap-1">
-                          <span>Strictness</span>
-                          <select
-                            className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm"
-                            value={source.verification_strictness}
-                            onChange={(event) => {
-                              setSettings((current) => ({
-                                ...current,
-                                blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, verification_strictness: event.target.value } : item),
-                              }));
-                            }}
-                          >
-                            <option value="strict">Strict</option>
-                            <option value="balanced">Balanced</option>
-                            <option value="relaxed">Relaxed</option>
-                          </select>
-                        </label>
-                        <label className="grid gap-1">
-                          <span>Refresh (minutes)</span>
-                          <Input
-                            value={String(source.refresh_interval_minutes)}
-                            onChange={(event) => {
-                              setSettings((current) => ({
-                                ...current,
-                                blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, refresh_interval_minutes: Number.parseInt(event.target.value, 10) || item.refresh_interval_minutes } : item),
-                              }));
-                            }}
-                          />
-                        </label>
-                      </div>
-                      <Button size="sm" onClick={() => void handleBlocklistEdit(source)} disabled={busyAction === `blocklist-save-${source.id}`}>
-                        Save metadata
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-
-        {showServicesView ? (
-          <Card id="services" className="animate-in fade-in slide-in-from-top-2">
-            <CardTitle>Services</CardTitle>
-            <CardDescription>Optional common-service toggles powered by the layered rules built in Rust.</CardDescription>
-            <div className="mt-5 space-y-4">
-              <Input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search services or categories" />
-              <div className="grid gap-3">
-                {filteredServices.map((service) => (
-                  <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="font-medium">{service.manifest.display_name}</div>
-                        <div className="text-sm text-muted-foreground">{service.manifest.risk_notes}</div>
-                      </div>
-                      <Badge>{service.mode}</Badge>
-                    </div>
-                    <div className="mt-3 flex gap-2">
-                      {(["Inherit", "Allow", "Block"] as const).map((mode) => (
-                        <Button
-                          key={mode}
-                          variant={service.mode === mode ? "primary" : "secondary"}
-                          size="sm"
-                          onClick={() => void handleServiceUpdate(service.manifest.service_id, mode)}
-                          disabled={busyAction === `service-${service.manifest.service_id}`}
-                        >
-                          {mode}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </Card>
-        ) : (
-          <Card id="services" className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between p-6">
-            <div>
-              <CardTitle>Services</CardTitle>
-              <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>
-            </div>
-            <Button variant="secondary" onClick={() => setShowServicesView(true)}>
-              Configure services
-            </Button>
-          </Card>
-        )}
-      </section>
-
-      <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-        <Card id="devices">
-          <CardTitle>Devices</CardTitle>
-          <CardDescription>Name devices and choose whether they inherit the global policy or carry a custom profile override with validated service-rule previews.</CardDescription>
-          <div className="mt-5 grid gap-3">
-            <div className="grid gap-3 md:grid-cols-2">
-              <Input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="MacBook Pro" />
-              <Input value={deviceIpAddress} onChange={(event) => setDeviceIpAddress(event.target.value)} placeholder="192.168.1.42" />
-            </div>
-            <div className="grid gap-3 md:grid-cols-4">
-              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={devicePolicyMode} onChange={(event) => setDevicePolicyMode(event.target.value as "global" | "custom")}>
-                <option value="global">Global</option>
-                <option value="custom">Custom</option>
-              </select>
-              <Input
-                value={deviceProfileOverride}
-                onChange={(event) => setDeviceProfileOverride(event.target.value)}
-                placeholder="balanced"
-                disabled={devicePolicyMode !== "custom"}
-              />
-              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceProtectionOverride} onChange={(event) => setDeviceProtectionOverride(event.target.value as "inherit" | "bypass")} disabled={devicePolicyMode !== "custom"}>
-                <option value="inherit">Inherit blocking</option>
-                <option value="bypass">Bypass blocking</option>
-              </select>
-              <Input
-                value={deviceAllowedDomains}
-                onChange={(event) => setDeviceAllowedDomains(event.target.value)}
-                placeholder="example.com, cdn.example.com"
-                disabled={devicePolicyMode !== "custom"}
-              />
-              <div className="flex gap-2">
-                <Button onClick={() => void handleDeviceSubmit()} disabled={!deviceName || !deviceIpAddress || busyAction === "device-submit"}>
-                  {deviceId ? "Save device" : "Add device"}
-                </Button>
-                {deviceId ? <Button variant="ghost" onClick={resetDeviceForm}>Cancel</Button> : null}
-              </div>
-            </div>
-            <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
-              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideId} onChange={(event) => setDeviceServiceOverrideId(event.target.value)} disabled={devicePolicyMode !== "custom"}>
-                <option value="">Select service override</option>
-                {settings.services.map((service) => (
-                  <option key={service.manifest.service_id} value={service.manifest.service_id}>
-                    {service.manifest.display_name}
-                  </option>
-                ))}
-              </select>
-              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideMode} onChange={(event) => setDeviceServiceOverrideMode(event.target.value as "allow" | "block")} disabled={devicePolicyMode !== "custom"}>
-                <option value="allow">Allow service</option>
-                <option value="block">Block service</option>
-              </select>
-              <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId || deviceServiceOverrideIsNoop}>
-                Add service rule
-              </Button>
-            </div>
-            {devicePolicyMode !== "custom" ? (
+            {dashboard.recent_security_events.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                Switch to custom policy mode to preview and add per-device service overrides.
-              </div>
-            ) : deviceServiceOverrideId && deviceServiceOverridePreview ? (
-              <div className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="font-medium">{deviceServiceOverridePreview.displayName}</div>
-                    <div className="mt-1 text-sm text-muted-foreground">{deviceServiceOverridePreview.riskNotes}</div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                    <Badge>{deviceServiceOverrideMode}</Badge>
-                    <Badge>{deviceServiceOverridePreview.category}</Badge>
-                    <Badge>
-                      {deviceServiceOverridePreview.domains.length} expanded domain{deviceServiceOverridePreview.domains.length === 1 ? "" : "s"}
-                    </Badge>
-                    {deviceServiceOverridePreview.exceptions.length > 0 ? (
-                      <Badge>{deviceServiceOverridePreview.exceptions.length} exception{deviceServiceOverridePreview.exceptions.length === 1 ? "" : "s"}</Badge>
-                    ) : null}
-                    {deviceServiceOverrideIsNoop ? <Badge>already queued</Badge> : null}
-                    {pendingDeviceServiceOverride && !deviceServiceOverrideIsNoop ? <Badge>replaces pending {pendingDeviceServiceOverride.mode}</Badge> : null}
-                  </div>
-                </div>
-                <div className="mt-3 text-sm text-muted-foreground">
-                  {deviceServiceOverrideMode === "allow"
-                    ? "Allow mode expands allow, block, and exception domains so the service keeps working for this device."
-                    : "Block mode expands blocked domains and preserves manifest exceptions so essential endpoints can still resolve."}
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {deviceServiceOverridePreview.sampleDomains.map((domain) => (
-                    <Badge key={domain}>{domain}</Badge>
-                  ))}
-                  {deviceServiceOverridePreview.domains.length > deviceServiceOverridePreview.sampleDomains.length ? (
-                    <Badge>
-                      +{deviceServiceOverridePreview.domains.length - deviceServiceOverridePreview.sampleDomains.length} more
-                    </Badge>
-                  ) : null}
-                </div>
-              </div>
-            ) : deviceServiceOverrideId ? (
-              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                The selected service does not currently expose any domains for this override mode.
+                No risky DNS events recorded yet.
               </div>
             ) : (
-              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                Select a service to preview the domains and exceptions that will be attached to this device rule.
-              </div>
-            )}
-            {deviceServiceOverrides.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {deviceServiceOverrides.map((override) => (
-                  <button key={`${override.service_id}-${override.mode}`} type="button" title={describeDeviceServiceOverride(override.service_id)} className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
-                    {formatDeviceServiceOverride(override.service_id, override.mode)} x
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <Separator className="my-2" />
-            <div className="grid gap-3">
-              {settings.devices.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                  No devices have been named yet.
-                </div>
-              ) : (
-                settings.devices.map((device) => (
-                  <div key={device.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium">{device.name}</div>
-                        <div className="text-sm text-muted-foreground">{device.ip_address}</div>
-                      </div>
-                      <Badge>{device.policy_mode}</Badge>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <Badge>{device.blocklist_profile_override ?? "inherits global profile"}</Badge>
-                      <Badge>{device.protection_override === "bypass" ? "blocking bypassed" : "inherits blocking"}</Badge>
-                      <Badge>
-                        {device.allowed_domains.length > 0
-                          ? `${device.allowed_domains.length} allowed domain${device.allowed_domains.length === 1 ? "" : "s"}`
-                          : "no device allowlist"}
-                      </Badge>
-                      <Badge>
-                        {device.service_overrides.length > 0
-                          ? `${device.service_overrides.length} service override${device.service_overrides.length === 1 ? "" : "s"}`
-                          : "no service overrides"}
-                      </Badge>
-                    </div>
-                    {device.service_overrides.length > 0 ? (
-                      <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
-                        {device.service_overrides.map((override) => (
-                          <div key={`${device.id}-${override.service_id}-${override.mode}`} className="rounded-2xl border border-border/70 bg-muted/40 px-3 py-2">
-                            <div className="font-medium text-foreground">{formatDeviceServiceOverride(override.service_id, override.mode)}</div>
-                            <div className="mt-1">{describeDeviceServiceOverride(override.service_id)}</div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                    <div className="mt-4">
-                      <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
-                        Edit device
-                      </Button>
-                    </div>
+              dashboard.recent_security_events.slice(0, 4).map((event) => (
+                <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-medium">{event.domain}</div>
+                    <Badge>{event.severity}</Badge>
                   </div>
-                ))
-              )}
-            </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {(event.device_name ?? "Unassigned device")} on {event.client_ip}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </Card>
 
         <Card>
-          <CardTitle>Operator feed</CardTitle>
-          <CardDescription>Audit and event visibility for the current backend scaffolding.</CardDescription>
-          <div className="mt-5 space-y-5">
-            <section className="space-y-3">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <div className="font-medium">Recent audit events</div>
-                  <div className="text-sm text-muted-foreground">Filter the operator feed to focus on the control-plane changes you are investigating.</div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    ["all", "All events"],
-                    ["runtime", "Runtime"],
-                    ["notifications", "Notifications"],
-                    ["devices", "Devices"],
-                    ["rulesets", "Rulesets"],
-                  ].map(([value, label]) => (
-                    <Button key={value} variant={auditEventFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setAuditEventFilter(value as "all" | "runtime" | "notifications" | "devices" | "rulesets")}>
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid gap-3">
-                {filteredAuditEvents.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                    No audit events match the selected filter.
-                  </div>
-                ) : (
-                  filteredAuditEvents.map((event) => {
-                    const summary = summarizeAuditEvent(event);
-                    return (
-                      <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-medium">{summary.title}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">{event.event_type}</div>
-                          </div>
-                          <Badge>{summary.category}</Badge>
-                        </div>
-                        <div className="mt-2 text-muted-foreground">{summary.detail}</div>
-                        <div className="mt-2 text-xs text-muted-foreground">{new Date(event.created_at).toLocaleString()}</div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-
-            <Separator />
-
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Runtime notes</div>
-                <Button variant="ghost" size="sm" onClick={handleRuntimeHealthCheck} disabled={busyAction === "runtime-health-check"}>
-                  {busyAction === "runtime-health-check" ? "Checking..." : "Run health check"}
-                </Button>
-              </div>
-              <div className="grid gap-3">
-                {dashboard.runtime_health.notes.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                    No runtime regressions detected.
-                  </div>
-                ) : (
-                  dashboard.runtime_health.notes.map((note) => (
-                    <div key={note} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                      {note}
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
+          <CardTitle>Notification health</CardTitle>
+          <CardDescription>Delivery status stays visible here while detailed controls live in Settings.</CardDescription>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+              <div className="text-muted-foreground">Delivered</div>
+              <div className="mt-1 text-2xl font-semibold text-foreground">{dashboard.notification_health.delivered_count}</div>
+            </div>
+            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+              <div className="text-muted-foreground">Failed</div>
+              <div className="mt-1 text-2xl font-semibold text-foreground">{dashboard.notification_health.failed_count}</div>
+            </div>
           </div>
         </Card>
       </section>
@@ -2725,15 +1815,6 @@ export default function App() {
         </section>
       )}
     </main>
-  );
-}
-
-function Metric({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
-  return (
-    <div className="rounded-[24px] border border-border/70 bg-muted/60 p-4">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">{icon}{label}</div>
-      <div className="mt-2 font-display text-2xl font-semibold">{value}</div>
-    </div>
   );
 }
 
