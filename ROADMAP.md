@@ -354,6 +354,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Add Tailscale installer/bootstrap support for exit-node-only traffic through Cogwheel when enabled in settings.
 - [x] Restore profile-local source editing and add platform-specific connection guidance on the dashboard.
 - [x] Fix new-profile drafting flow and advertise Android-friendly DNS targets alongside hostname guidance.
+- [x] Keep the live dashboard auto-refreshing so DNS, Tailscale, and risk activity update without manual reloads.
 - [x] Advertise IPv6 DNS targets and dual-stack guidance so clients do not bypass IPv4-only filtering.
 - [x] Keep the default Settings view focused on everyday household controls, with advanced operator features gated behind an explicit advanced mode.
 - [x] Allow saved block profiles to be deleted from the profile editor.
