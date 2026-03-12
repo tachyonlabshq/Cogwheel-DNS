@@ -61,6 +61,7 @@ struct ServerState {
     rate_limiter: Arc<RateLimiter>,
     dns_udp_bind_addr: SocketAddr,
     advertised_dns_port: u16,
+    advertised_dns_targets: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -650,6 +651,17 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(config.server.dns_udp_bind_addr.port()),
+        advertised_dns_targets: std::env::var("COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     };
     if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
         tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
@@ -3120,8 +3132,12 @@ async fn resolver_access_status(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<ResolverAccessStatus>>, axum::http::StatusCode> {
-    let dns_targets =
-        discover_dns_targets(state.advertised_dns_port, state.dns_udp_bind_addr, &headers);
+    let dns_targets = discover_dns_targets(
+        state.advertised_dns_port,
+        state.dns_udp_bind_addr,
+        &headers,
+        &state.advertised_dns_targets,
+    );
     let tailscale_ip = discover_tailscale_ipv4();
     let hostname = std::env::var("HOSTNAME")
         .ok()
@@ -3141,6 +3157,12 @@ async fn resolver_access_status(
                 .to_string(),
         );
     }
+    if state.advertised_dns_port == 53 {
+        notes.push(
+            "Android tablets and phones should use the Wi-Fi network DNS setting with the LAN IP shown here; Android Private DNS expects DNS-over-TLS and is not the right mode for this deployment."
+                .to_string(),
+        );
+    }
 
     Ok(Json(ApiEnvelope {
         data: ResolverAccessStatus {
@@ -3156,8 +3178,13 @@ fn discover_dns_targets(
     advertised_port: u16,
     bind_addr: SocketAddr,
     headers: &HeaderMap,
+    configured_targets: &[String],
 ) -> Vec<String> {
     let mut targets = Vec::new();
+
+    for target in configured_targets {
+        targets.push(format_dns_target(target, advertised_port));
+    }
 
     if let Some(host) = headers
         .get("host")
@@ -3191,6 +3218,9 @@ fn discover_dns_targets(
 }
 
 fn format_dns_target(host: &str, port: u16) -> String {
+    if host.contains(':') || host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return host.to_string();
+    }
     if port == 53 {
         host.to_string()
     } else {

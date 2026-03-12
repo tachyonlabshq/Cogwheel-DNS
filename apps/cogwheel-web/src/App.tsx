@@ -197,6 +197,7 @@ export default function App() {
   const [deviceServiceOverrideId, setDeviceServiceOverrideId] = useState("");
   const [deviceServiceOverrideMode, setDeviceServiceOverrideMode] = useState<"allow" | "block">("allow");
   const [selectedBlockProfileId, setSelectedBlockProfileId] = useState<string | null>(null);
+  const [creatingNewBlockProfile, setCreatingNewBlockProfile] = useState(false);
   const [blockProfileDraft, setBlockProfileDraft] = useState<BlockProfileRecord>(emptyBlockProfileDraft);
   const [blockProfileAllowlistDraft, setBlockProfileAllowlistDraft] = useState("");
   const [customProfileListName, setCustomProfileListName] = useState("");
@@ -295,8 +296,13 @@ export default function App() {
   useEffect(() => {
     const selectedProfile = settings.block_profiles.find((profile) => profile.id === selectedBlockProfileId);
     if (selectedProfile) {
+      setCreatingNewBlockProfile(false);
       setBlockProfileDraft(selectedProfile);
       setBlockProfileAllowlistDraft(selectedProfile.allowlists.join(", "));
+      return;
+    }
+
+    if (creatingNewBlockProfile) {
       return;
     }
 
@@ -312,7 +318,7 @@ export default function App() {
       setBlockProfileDraft(emptyBlockProfileDraft);
       setBlockProfileAllowlistDraft("");
     }
-  }, [selectedBlockProfileId, settings.block_profiles]);
+  }, [creatingNewBlockProfile, selectedBlockProfileId, settings.block_profiles]);
 
   function pushToast(title: string, detail: string | undefined, tone: Toast["tone"]) {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -559,6 +565,9 @@ export default function App() {
       },
     ];
   }, [dashboard.recent_security_events.length, dashboard.runtime_health.snapshot.blocked_total, dashboard.runtime_health.snapshot.queries_total, latencyBudget.within_budget]);
+
+  const primaryDnsTarget = resolverAccess.dns_targets[0] ?? "fractal.local";
+  const androidDnsTarget = resolverAccess.dns_targets.find((target) => /^\d{1,3}(\.\d{1,3}){3}$/.test(target)) ?? primaryDnsTarget;
 
   const serviceLabelMap = useMemo(
     () =>
@@ -836,6 +845,7 @@ export default function App() {
       });
       const nextSelectedId = (updatedProfiles.find((profile) => profile.name === blockProfileDraft.name)?.id) ?? blockProfileDraft.id;
       setSettings((current) => ({ ...current, block_profiles: updatedProfiles }));
+      setCreatingNewBlockProfile(false);
       setSelectedBlockProfileId(nextSelectedId || null);
       pushToast("Block profile saved", `${blockProfileDraft.name} is ready for device assignment.`, "success");
       await load();
@@ -847,6 +857,7 @@ export default function App() {
   }
 
   function startNewBlockProfile() {
+    setCreatingNewBlockProfile(true);
     setSelectedBlockProfileId(null);
     setBlockProfileDraft({ ...emptyBlockProfileDraft, updated_at: new Date().toISOString() });
     setBlockProfileAllowlistDraft("");
@@ -855,6 +866,7 @@ export default function App() {
   }
 
   function selectBlockProfile(profile: BlockProfileRecord) {
+    setCreatingNewBlockProfile(false);
     setSelectedBlockProfileId(profile.id);
     setBlockProfileDraft(profile);
     setBlockProfileAllowlistDraft(profile.allowlists.join(", "));
@@ -1266,23 +1278,23 @@ export default function App() {
               {[
                 {
                   title: "Android",
-                  detail: "Network & internet -> Private DNS or the current Wi-Fi network -> DNS server.",
-                  target: resolverAccess.dns_targets[0] ?? "fractal.local",
+                  detail: "Use the Wi-Fi network DNS server setting with this LAN IP. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
+                  target: androidDnsTarget,
                 },
                 {
                   title: "iPhone / iPad",
                   detail: "Wi-Fi -> tap the info icon -> Configure DNS -> Manual.",
-                  target: resolverAccess.dns_targets[0] ?? "fractal.local",
+                  target: primaryDnsTarget,
                 },
                 {
                   title: "Mac",
                   detail: "System Settings -> Wi-Fi -> Details -> DNS, then add this resolver.",
-                  target: resolverAccess.dns_targets[0] ?? "fractal.local",
+                  target: primaryDnsTarget,
                 },
                 {
                   title: "Windows",
                   detail: "Network & Internet -> Hardware properties -> DNS server assignment -> Edit.",
-                  target: resolverAccess.dns_targets[0] ?? "fractal.local",
+                  target: primaryDnsTarget,
                 },
               ].map((platform) => (
                 <div key={platform.title} className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
