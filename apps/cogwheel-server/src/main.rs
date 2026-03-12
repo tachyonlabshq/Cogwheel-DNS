@@ -1686,7 +1686,7 @@ fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
         .map(|peers| peers.len())
         .unwrap_or(0);
     let advertised_exit_node = read_tailscale_exit_node_pref().unwrap_or(false);
-    let exit_node_active = value
+    let status_reports_exit_node = value
         .get("Self")
         .and_then(|self_value| {
             self_value
@@ -1702,7 +1702,8 @@ fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
                     .unwrap_or_else(|| value.as_str().is_some_and(|s| !s.is_empty()))
             })
         })
-        .unwrap_or(advertised_exit_node);
+        .unwrap_or(false);
+    let exit_node_active = advertised_exit_node || status_reports_exit_node;
     let health_warnings = value
         .get("Health")
         .and_then(serde_json::Value::as_array)
