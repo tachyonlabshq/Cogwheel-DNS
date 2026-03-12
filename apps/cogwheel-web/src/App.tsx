@@ -274,9 +274,64 @@ export default function App() {
     }
   }, [notificationAnalyticsWindow, notificationHistoryWindow]);
 
+  const refreshLiveData = useCallback(async () => {
+    try {
+      const [dashboardData, syncStatusData, tailscaleData, tailscaleDns, latencyBudgetData, resolverAccessData] = await Promise.all([
+        api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
+        api.syncStatus(),
+        api.tailscaleStatus(),
+        api.tailscaleDnsCheck(),
+        api.latencyBudget(),
+        api.resolverAccess(),
+      ]);
+
+      localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
+      localStorage.setItem("cogwheel_sync_status_cache", JSON.stringify(syncStatusData));
+      localStorage.setItem("cogwheel_tailscale_cache", JSON.stringify(tailscaleData));
+      localStorage.setItem("cogwheel_tailscale_dns_cache", JSON.stringify(tailscaleDns));
+      localStorage.setItem("cogwheel_latency_budget_cache", JSON.stringify(latencyBudgetData));
+      localStorage.setItem("cogwheel_resolver_access_cache", JSON.stringify(resolverAccessData));
+
+      setDashboard(dashboardData);
+      setSyncStatus(syncStatusData);
+      setTailscaleStatus(tailscaleData);
+      setTailscaleDnsCheck(tailscaleDns);
+      setLatencyBudget(latencyBudgetData);
+      setResolverAccess(resolverAccessData);
+      setError(null);
+      setState("ready");
+    } catch (refreshError) {
+      if (state === "ready") {
+        setError(refreshError instanceof Error ? refreshError.message : "Unknown error");
+      }
+    }
+  }, [notificationAnalyticsWindow, notificationHistoryWindow, state]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (state !== "ready") {
+      return;
+    }
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshLiveData();
+      }
+    };
+
+    const intervalId = window.setInterval(refreshIfVisible, 5000);
+    window.addEventListener("focus", refreshIfVisible);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshIfVisible);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshLiveData, state]);
 
   useEffect(() => {
     setClassifierThreshold(settings.classifier.threshold.toFixed(2));
