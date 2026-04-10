@@ -1213,7 +1213,7 @@ export default function App() {
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className={`pointer-events-auto rounded-[22px] border px-4 py-3 shadow-lg backdrop-blur ${toast.tone === "error" ? "border-accent/30 bg-white text-foreground" : "border-border/70 bg-white/95 text-foreground"}`}
+            className={`pointer-events-auto rounded-[22px] border px-4 py-3 shadow-lg backdrop-blur ${toast.tone === "error" ? "border-accent/30 bg-card text-foreground" : "border-border/70 bg-card/95 text-foreground"}`}
           >
             <div className="font-medium">{toast.title}</div>
             {toast.detail ? <div className="mt-1 text-sm text-muted-foreground">{toast.detail}</div> : null}
@@ -1898,7 +1898,7 @@ export default function App() {
                   </Button>
                 </div>
                 {tailscaleDnsCheck.suggestions.length > 0 ? (
-                  <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">{tailscaleDnsCheck.message}</div>
+                  <div className="mt-3 rounded-lg bg-primary/10 px-3 py-2 text-xs text-primary">{tailscaleDnsCheck.message}</div>
                 ) : null}
                 <div className="mt-3 text-xs text-muted-foreground">When enabled, Cogwheel advertises this machine as a Tailscale exit node and keeps DNS on the local filter path for exit-node traffic only.</div>
               </div>

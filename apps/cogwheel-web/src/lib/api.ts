@@ -364,9 +364,18 @@ export type ResolverAccessStatus = {
 };
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const { headers: extraHeaders, ...restInit } = init ?? {};
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
+    ...restInit,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+      ...(extraHeaders instanceof Headers
+        ? Object.fromEntries(extraHeaders.entries())
+        : Array.isArray(extraHeaders)
+          ? Object.fromEntries(extraHeaders)
+          : extraHeaders),
+    },
   });
   if (!response.ok) {
     const detail = (await response.text()).trim();
