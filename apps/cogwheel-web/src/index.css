@@ -72,7 +72,3 @@ body {
   @apply min-h-screen;
 }
 
-@keyframes pulse-bar {
-  0%, 100% { opacity: var(--bar-opacity); }
-  50% { opacity: calc(var(--bar-opacity) - 0.15); }
-}
