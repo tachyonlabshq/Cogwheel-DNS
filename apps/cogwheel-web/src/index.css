@@ -92,6 +92,9 @@
 
   body {
     @apply bg-background text-foreground font-sans min-h-screen antialiased;
+    background-image:
+      radial-gradient(ellipse at 20% 0%, hsl(var(--primary) / 0.04) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, hsl(var(--primary) / 0.02) 0%, transparent 50%);
   }
 
   /* Smooth transitions on interactive elements */
@@ -151,6 +154,69 @@
 .stagger-2 { animation-delay: 100ms; }
 .stagger-3 { animation-delay: 150ms; }
 .stagger-4 { animation-delay: 200ms; }
+.stagger-5 { animation-delay: 250ms; }
+.stagger-6 { animation-delay: 300ms; }
+
+/* Dark mode atmospheric background */
+.dark body {
+  background-image:
+    radial-gradient(ellipse at 20% 0%, hsl(var(--primary) / 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 100%, hsl(var(--primary) / 0.03) 0%, transparent 50%);
+}
+
+/* Card hover lift */
+[data-slot="card"] {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+[data-slot="card"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+/* Gold shimmer progress */
+.gold-shimmer {
+  background: linear-gradient(90deg, hsl(var(--primary) / 0.3), hsl(var(--primary) / 0.6), hsl(var(--primary) / 0.3));
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+/* Sidebar active nav indicator */
+.nav-active {
+  position: relative;
+}
+.nav-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  border-radius: 0 2px 2px 0;
+  background: hsl(var(--primary));
+  transition: height 0.15s ease;
+}
+
+/* Scanning animation for status bar */
+@keyframes scan-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+/* Refined table hover */
+[data-slot="table-row"]:hover {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+/* Badge subtle polish */
+[data-slot="badge"] {
+  letter-spacing: 0.02em;
+}
 
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {

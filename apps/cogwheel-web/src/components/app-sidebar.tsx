@@ -99,12 +99,16 @@ export function AppSidebar() {
                         }),
                       );
                     }}
-                    className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors mb-0.5 ${
+                    className={`group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors mb-0.5 ${
                       isActive
                         ? "bg-secondary/70"
                         : "hover:bg-secondary/30"
                     }`}
                   >
+                    {/* Active indicator bar */}
+                    {isActive && (
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-4 w-[3px] rounded-r-sm bg-primary" />
+                    )}
                     <item.icon
                       className={`h-4 w-4 shrink-0 ${
                         isActive

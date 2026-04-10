@@ -82,7 +82,7 @@ export function Dashboard() {
                 onClick={() => setActiveTab(tab.key)}
                 className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
                   activeTab === tab.key
-                    ? "bg-background text-foreground shadow-sm"
+                    ? "bg-background text-foreground shadow-sm ring-1 ring-foreground/5"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
@@ -100,8 +100,8 @@ export function Dashboard() {
           <ThemeToggle />
           <Button
             size="sm"
-            variant="secondary"
-            className="gap-1.5 text-xs"
+            variant="ghost"
+            className="gap-1.5 text-xs text-muted-foreground hover:text-foreground"
             onClick={handleRefresh}
           >
             <RotateCw className="h-3 w-3" /> Refresh

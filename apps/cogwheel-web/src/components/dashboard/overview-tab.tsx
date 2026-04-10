@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Activity, ShieldOff } from "lucide-react";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,11 +21,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-function EmptyRow({ colSpan, children }: { colSpan: number; children: React.ReactNode }) {
+function EmptyRow({
+  colSpan,
+  icon: Icon,
+  children,
+}: {
+  colSpan: number;
+  icon?: React.ComponentType<React.SVGProps<SVGSVGElement>>;
+  children: React.ReactNode;
+}) {
   return (
     <TableRow>
-      <TableCell colSpan={colSpan} className="text-center text-muted-foreground h-24">
-        {children}
+      <TableCell colSpan={colSpan} className="h-32 text-center">
+        <div className="flex flex-col items-center gap-2 text-muted-foreground">
+          {Icon && <Icon className="h-8 w-8 text-muted-foreground/30" />}
+          <p className="text-sm">{children}</p>
+        </div>
       </TableCell>
     </TableRow>
   );
@@ -108,7 +120,7 @@ export function OverviewTab() {
       {/* ---------- Section Cards ---------- */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {/* Protection Status */}
-        <Card className="">
+        <Card className={`animate-fade-up stagger-1 ${dashboard.protection_status === "Active" ? "ring-2 ring-primary/20" : dashboard.protection_status === "Paused" ? "" : "ring-2 ring-destructive/20"}`}>
           <CardHeader>
             <CardDescription>Protection Status</CardDescription>
             <CardTitle className="text-2xl font-semibold tabular-nums">
@@ -151,7 +163,7 @@ export function OverviewTab() {
         </Card>
 
         {/* Sources */}
-        <Card className="">
+        <Card className="animate-fade-up stagger-2">
           <CardHeader>
             <CardDescription>Sources</CardDescription>
             <CardTitle className="text-2xl font-semibold tabular-nums">
@@ -172,7 +184,7 @@ export function OverviewTab() {
         </Card>
 
         {/* Blocked Queries */}
-        <Card className="">
+        <Card className="animate-fade-up stagger-3">
           <CardHeader>
             <CardDescription>Blocked Queries</CardDescription>
             <CardTitle className="text-2xl font-semibold tabular-nums">
@@ -193,7 +205,7 @@ export function OverviewTab() {
         </Card>
 
         {/* Devices */}
-        <Card className="">
+        <Card className="animate-fade-up stagger-4">
           <CardHeader>
             <CardDescription>Devices</CardDescription>
             <CardTitle className="text-2xl font-semibold tabular-nums">
@@ -217,7 +229,7 @@ export function OverviewTab() {
       {/* ---------- Domain Lists ---------- */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* Top Queried Domains */}
-        <Card>
+        <Card className="animate-fade-up stagger-5">
           <CardHeader>
             <CardTitle>Top Queried Domains</CardTitle>
             <CardDescription>Recent destinations seen by the resolver over the last day</CardDescription>
@@ -232,7 +244,7 @@ export function OverviewTab() {
               </TableHeader>
               <TableBody>
                 {dashboard.domain_insights.top_queried_domains.length === 0 ? (
-                  <EmptyRow colSpan={2}>
+                  <EmptyRow colSpan={2} icon={Activity}>
                     Query activity will appear here once devices begin sending traffic through Cogwheel.
                   </EmptyRow>
                 ) : (
@@ -249,7 +261,7 @@ export function OverviewTab() {
         </Card>
 
         {/* Top Blocked Domains */}
-        <Card>
+        <Card className="animate-fade-up stagger-5">
           <CardHeader>
             <CardTitle>Top Blocked Domains</CardTitle>
             <CardDescription>Where protection is actively stepping in right now</CardDescription>
@@ -264,7 +276,7 @@ export function OverviewTab() {
               </TableHeader>
               <TableBody>
                 {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
-                  <EmptyRow colSpan={2}>
+                  <EmptyRow colSpan={2} icon={ShieldOff}>
                     No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
                   </EmptyRow>
                 ) : (
@@ -293,7 +305,7 @@ export function OverviewTab() {
       {/* ---------- Resolver Access & Resolver Summary ---------- */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Resolver Access */}
-        <Card>
+        <Card className="animate-fade-up stagger-6">
           <CardHeader>
             <CardTitle>How to Connect Devices</CardTitle>
             <CardDescription>
@@ -373,7 +385,7 @@ export function OverviewTab() {
         </Card>
 
         {/* Resolver Summary */}
-        <Card>
+        <Card className="animate-fade-up stagger-6">
           <CardHeader>
             <CardTitle>Resolver Summary</CardTitle>
             <CardDescription>
@@ -426,7 +438,7 @@ export function OverviewTab() {
       </div>
 
       {/* ---------- Security Events ---------- */}
-      <Card>
+      <Card className="animate-fade-up stagger-6">
         <CardHeader>
           <CardTitle>Recent Risky Events</CardTitle>
           <CardDescription>
