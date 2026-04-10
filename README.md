@@ -1,61 +1,26 @@
-# Cogwheel DNS
+Cogwheel is a lightweight, Rust-powered DNS adblock platform that replaces Pi-hole with a safer, faster alternative built for modern home networks.
 
-Cogwheel DNS is a Rust-native DNS adblock platform with a Docker server backend, safe blocklist updates, and a background real-time classifier.
+## Screenshots
 
-## Current Scope
+![Cogwheel dashboard showing protection status, DNS query stats, and domain blocking](./docs/screenshot.png)
 
-- Phase 1: monorepo foundation and shared infrastructure
-- Phase 2: DNS backend MVP with health endpoints and Docker packaging
-- Phase 3: safe blocklist ingestion, verification, and atomic ruleset activation
-- Phase 7: Tailscale exit-node integration and rollback flows
-- Phase 8: hardening, recovery, load testing, and release gates
-- Phase 9: GA documentation and ecosystem polish in progress
+## How it works
 
-## Quick Links
+Cogwheel runs a full DNS resolver written in Rust that intercepts queries before they leave your network. When a device asks for a domain that appears on any active blocklist, the resolver returns a null response instantly — no tracker or ad server is ever contacted. The hot path is deterministic and never blocks on ML inference.
 
-- Operator quick start: `docs/operator-quickstart.md`
-- User quick start: `docs/user-quickstart.md`
-- Reliability budgets: `docs/reliability-budgets.md`
-- Hot-path guardrails: `docs/hot-path-guardrails.md`
-- Crate boundary guardrails: `docs/crate-boundary-guardrails.md`
-- Architecture decisions: `docs/adr/README.md`
-- Release policy: `docs/release-policy.md`
-- Deployment notes: `DEPLOY.md`
-- Contribution guide: `CONTRIBUTING.md`
+Blocklist updates are staged in a candidate pipeline and atomically promoted only after verification passes. If a new ruleset degrades runtime health, the control plane automatically rolls back to the last known-good policy set. This means household DNS never breaks because of a bad upstream list update.
 
-## Local Development
+The web control plane gives every household member a calm, readable dashboard. Block profiles let you assign different filtering levels per device — a child's tablet gets strict protection while a work laptop keeps developer tools accessible. The Grease-AI classifier monitors DNS traffic patterns in the background and flags risky domains without touching the hot path.
 
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets --all-features
-cargo test --workspace
-cargo run -p cogwheel-server
-```
+Multi-node sync, Tailscale exit-node integration, and webhook-based security alerts round out the platform for users who run Cogwheel across multiple sites.
 
-For a local Web UI session that avoids privileged ports on macOS:
+## Stack
 
-```bash
-COGWHEEL_PROFILE=dev \
-COGWHEEL_SERVER__HTTP_BIND_ADDR=127.0.0.1:30080 \
-COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=127.0.0.1:30053 \
-COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=127.0.0.1:30053 \
-cargo run -p cogwheel-server
-```
+- **Rust** — Axum HTTP server, Hickory DNS resolver, Moka cache, SQLite via rusqlite
+- **React 19** — Vite, TypeScript, ShadCN/UI, Tailwind CSS
+- **Docker** — Single-container deployment with environment-based config
+- **Prometheus** — Metrics endpoint for observability
 
-## Configuration
+## Status
 
-The server reads settings from environment variables with the `COGWHEEL_` prefix.
-
-- `COGWHEEL_PROFILE` (`dev`, `home`, `smb`)
-- `COGWHEEL_SERVER__HTTP_BIND_ADDR`
-- `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
-- `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`
-- `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` (use when host port 53 maps to an internal safe port)
-- `COGWHEEL_STORAGE__DATABASE_URL`
-- `COGWHEEL_UPSTREAM__SERVERS`
-
-## Design Notes
-
-- The DNS hot path stays deterministic and LLM-independent.
-- Blocklist updates are staged and atomically promoted.
-- Unsafe or malformed list updates never replace the active ruleset.
+In progress
