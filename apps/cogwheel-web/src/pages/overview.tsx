@@ -2,10 +2,35 @@ import { useMemo } from "react";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { ListRow, EmptyState, Row } from "@/components/shared";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
-export default function OverviewPage() {
+function EmptyRow({ colSpan, children }: { colSpan: number; children: React.ReactNode }) {
+  return (
+    <TableRow>
+      <TableCell colSpan={colSpan} className="text-center text-muted-foreground h-24">
+        {children}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+export default function Overview() {
   const {
     dashboard,
     settings,
@@ -22,39 +47,25 @@ export default function OverviewPage() {
     [settings.blocklists],
   );
 
-  const overviewStats = useMemo(() => {
-    const allowlistCount = settings.block_profiles.reduce(
-      (total, profile) => total + profile.allowlists.length,
-      0,
-    );
-    return [
-      {
-        label: "Sources",
-        value: dashboard.enabled_source_count.toLocaleString(),
-        accent: "border-sky-200 bg-sky-50/70 dark:border-sky-800 dark:bg-sky-950/50",
-        detail: `${settings.blocklists.length} blocklist source${settings.blocklists.length === 1 ? "" : "s"} and ${allowlistCount} saved allowlist entr${allowlistCount === 1 ? "y" : "ies"}`,
-      },
-      {
-        label: "Blocked DNS Queries",
-        value: dashboard.runtime_health.snapshot.blocked_total.toLocaleString(),
-        accent: "border-rose-200 bg-rose-50/70 dark:border-rose-800 dark:bg-rose-950/50",
-        detail: `${dashboard.runtime_health.snapshot.queries_total.toLocaleString()} total queries observed by this node`,
-      },
-      {
-        label: "Devices",
-        value: dashboard.device_count.toLocaleString(),
-        accent: "border-emerald-200 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/50",
-        detail: "Recognized unique devices currently visible to the control plane",
-      },
-    ];
-  }, [
-    dashboard.device_count,
-    dashboard.enabled_source_count,
-    dashboard.runtime_health.snapshot.blocked_total,
-    dashboard.runtime_health.snapshot.queries_total,
-    settings.block_profiles,
-    settings.blocklists.length,
-  ]);
+  const allowlistCount = useMemo(
+    () =>
+      settings.block_profiles.reduce(
+        (total, profile) => total + profile.allowlists.length,
+        0,
+      ),
+    [settings.block_profiles],
+  );
+
+  const protectionBadgeVariant = useMemo(() => {
+    switch (dashboard.protection_status) {
+      case "Active":
+        return "default" as const;
+      case "Paused":
+        return "secondary" as const;
+      default:
+        return "outline" as const;
+    }
+  }, [dashboard.protection_status]);
 
   const primaryDnsTarget = resolverAccess.dns_targets[0] ?? "fractal.local";
   const androidDnsTarget =
@@ -65,23 +76,55 @@ export default function OverviewPage() {
     (target) => target.includes(":") && !target.includes("."),
   );
 
+  const platformGuides = [
+    {
+      title: "Android",
+      detail: ipv6DnsTarget
+        ? "Use the Wi-Fi network DNS server setting with this LAN IPv4 and also add the IPv6 resolver shown below on dual-stack networks. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS."
+        : "Use the Wi-Fi network DNS server setting with this LAN IP. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
+      target: androidDnsTarget,
+    },
+    {
+      title: "iPhone / iPad",
+      detail: "Wi-Fi -> tap the info icon -> Configure DNS -> Manual.",
+      target: primaryDnsTarget,
+    },
+    {
+      title: "Mac",
+      detail:
+        "System Settings -> Wi-Fi -> Details -> DNS, then add this resolver.",
+      target: primaryDnsTarget,
+    },
+    {
+      title: "Windows",
+      detail:
+        "Network & Internet -> Hardware properties -> DNS server assignment -> Edit.",
+      target: primaryDnsTarget,
+    },
+  ];
+
   return (
     <>
-      <section className="space-y-6">
-        <Card className="overflow-hidden p-0">
-          <div className="flex flex-col gap-4 border-b border-border px-6 py-5 bg-muted/30 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h1 className="font-display text-3xl font-semibold tracking-tight">
-                Dashboard
-              </h1>
-              <div className="mt-1 text-sm text-muted-foreground">
-                A clean snapshot of household filtering, blocked traffic, and
-                active devices.
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
+      {/* ---------- Section Cards ---------- */}
+      <div className="grid grid-cols-1 gap-4 px-4 sm:grid-cols-2 lg:px-6 xl:grid-cols-4">
+        {/* Protection Status */}
+        <Card className="">
+          <CardHeader>
+            <CardDescription>Protection Status</CardDescription>
+            <CardTitle className="text-2xl font-semibold tabular-nums">
+              {dashboard.protection_status}
+            </CardTitle>
+            <CardAction>
+              <Badge variant={protectionBadgeVariant}>
+                {dashboard.protection_status}
+              </Badge>
+            </CardAction>
+          </CardHeader>
+          <CardFooter className="flex-col items-start gap-1 text-sm">
+            <div className="flex gap-2">
               {dashboard.protection_status === "Paused" ? (
                 <Button
+                  size="sm"
                   variant="secondary"
                   onClick={() => void handleResumeRuntime()}
                   disabled={busyAction === "resume-runtime"}
@@ -90,279 +133,362 @@ export default function OverviewPage() {
                 </Button>
               ) : (
                 <Button
+                  size="sm"
                   variant="outline"
                   onClick={() => void handlePauseRuntime(10)}
                   disabled={busyAction === "pause-runtime"}
                 >
-                  Pause 10m
+                  Pause 10 min
                 </Button>
               )}
             </div>
-          </div>
-
-          <div className="px-6 py-6">
-            <section
-              id="quick-health"
-              className="grid gap-4 md:grid-cols-2 xl:grid-cols-3"
-            >
-              {overviewStats.map((item) => (
-                <Card key={item.label} className={`p-5 ${item.accent} shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-default`}>
-                  <div className="text-sm text-muted-foreground">
-                    {item.label}
-                  </div>
-                  <div className="mt-3 font-display text-4xl font-semibold tracking-tight sm:text-5xl">
-                    {item.value}
-                  </div>
-                  <div className="mt-2 text-sm text-muted-foreground">
-                    {item.detail}
-                  </div>
-                </Card>
-              ))}
-            </section>
-          </div>
-        </Card>
-      </section>
-
-      <section className="grid gap-6 xl:grid-cols-2">
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5 bg-muted/30">
-            <CardTitle>Top queried domains</CardTitle>
-            <CardDescription className="mt-1">
-              Recent destinations seen by the resolver over the last day.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6">
-            {dashboard.domain_insights.top_queried_domains.length === 0 ? (
-              <EmptyState>
-                Query activity will appear here once devices begin sending
-                traffic through Cogwheel.
-              </EmptyState>
-            ) : (
-              dashboard.domain_insights.top_queried_domains.map(
-                (entry, index) => (
-                  <ListRow
-                    key={entry.domain}
-                    tone="muted"
-                    title={entry.domain}
-                    detail={`#${String(index + 1).padStart(2, "0")} most active domain in the recent resolver window.`}
-                    right={
-                      <div className="text-right">
-                        <div className="font-display text-2xl font-semibold">
-                          {entry.count}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          queries
-                        </div>
-                      </div>
-                    }
-                  />
-                ),
-              )
-            )}
-          </div>
-        </Card>
-
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5 bg-muted/30">
-            <CardTitle>Top blocked domains</CardTitle>
-            <CardDescription className="mt-1">
-              Where protection is actively stepping in right now.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6">
-            {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
-              <EmptyState>
-                No blocked domains yet. When filtering engages, the busiest
-                blocked destinations will appear here.
-              </EmptyState>
-            ) : (
-              dashboard.domain_insights.top_blocked_domains.map((entry) => (
-                <ListRow
-                  key={entry.domain}
-                  tone="muted"
-                  title={entry.domain}
-                  detail="Blocked before the query could complete."
-                  right={
-                    <Badge className="bg-foreground text-background">
-                      {entry.count} blocked
-                    </Badge>
-                  }
-                />
-              ))
-            )}
-          </div>
-        </Card>
-      </section>
-
-      {error ? (
-        <Card className="border-accent/30 bg-accent/10 text-accent-foreground">
-          {error}
-        </Card>
-      ) : null}
-
-      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card id="resolver-access" className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5 bg-muted/30">
-            <CardTitle>How to connect devices</CardTitle>
-            <CardDescription className="mt-1">
-              Use one of these DNS targets on phones, laptops, TVs, or routers
-              that should use this Cogwheel instance.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6">
-            {resolverAccess.dns_targets.length === 0 ? (
-              <EmptyState>
-                Resolver targets will appear here once the control plane reports
-                reachable DNS addresses.
-              </EmptyState>
-            ) : (
-              resolverAccess.dns_targets.map((target) => (
-                <ListRow
-                  key={target}
-                  title="DNS server"
-                  detail={target}
-                  detailClassName="mt-1 font-mono text-base font-semibold text-foreground"
-                />
-              ))
-            )}
-            <ListRow
-              title="Tailscale"
-              detail={
-                resolverAccess.tailscale_ip ?? "Not available on this node"
-              }
-              tone="muted"
-            />
-            {resolverAccess.notes.length > 0 ? (
-              <EmptyState>{resolverAccess.notes.join(" ")}</EmptyState>
-            ) : null}
-            <div className="grid gap-3 md:grid-cols-2">
-              {[
-                {
-                  title: "Android",
-                  detail: ipv6DnsTarget
-                    ? "Use the Wi-Fi network DNS server setting with this LAN IPv4 and also add the IPv6 resolver shown below on dual-stack networks. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS."
-                    : "Use the Wi-Fi network DNS server setting with this LAN IP. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
-                  target: androidDnsTarget,
-                },
-                {
-                  title: "iPhone / iPad",
-                  detail:
-                    "Wi-Fi -> tap the info icon -> Configure DNS -> Manual.",
-                  target: primaryDnsTarget,
-                },
-                {
-                  title: "Mac",
-                  detail:
-                    "System Settings -> Wi-Fi -> Details -> DNS, then add this resolver.",
-                  target: primaryDnsTarget,
-                },
-                {
-                  title: "Windows",
-                  detail:
-                    "Network & Internet -> Hardware properties -> DNS server assignment -> Edit.",
-                  target: primaryDnsTarget,
-                },
-              ].map((platform) => (
-                <ListRow
-                  key={platform.title}
-                  title={platform.title}
-                  detail={platform.detail}
-                  right={
-                    <div className="font-mono text-sm font-semibold text-foreground">
-                      {platform.target}
-                    </div>
-                  }
-                />
-              ))}
+            <div className="text-muted-foreground">
+              {dashboard.active_ruleset
+                ? `Ruleset ${dashboard.active_ruleset.hash.slice(0, 12)}`
+                : "No active ruleset"}
             </div>
-            {ipv6DnsTarget ? (
-              <ListRow
-                title="IPv6 DNS target"
-                detail="If your router or clients use IPv6 DNS, point them here too so traffic does not bypass the IPv4 filter path."
-                right={
-                  <div className="break-all font-mono text-sm font-semibold text-foreground">
-                    {ipv6DnsTarget}
-                  </div>
-                }
-              />
+          </CardFooter>
+        </Card>
+
+        {/* Sources */}
+        <Card className="">
+          <CardHeader>
+            <CardDescription>Sources</CardDescription>
+            <CardTitle className="text-2xl font-semibold tabular-nums">
+              {dashboard.enabled_source_count.toLocaleString()}
+            </CardTitle>
+            <CardAction>
+              <Badge variant="secondary">enabled</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardFooter className="flex-col items-start gap-1 text-sm">
+            <div className="line-clamp-1 flex gap-2 font-medium">
+              {settings.blocklists.length} blocklist source{settings.blocklists.length === 1 ? "" : "s"}
+            </div>
+            <div className="text-muted-foreground">
+              {allowlistCount} saved allowlist entr{allowlistCount === 1 ? "y" : "ies"}
+            </div>
+          </CardFooter>
+        </Card>
+
+        {/* Blocked Queries */}
+        <Card className="">
+          <CardHeader>
+            <CardDescription>Blocked Queries</CardDescription>
+            <CardTitle className="text-2xl font-semibold tabular-nums">
+              {dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}
+            </CardTitle>
+            <CardAction>
+              <Badge variant="destructive">blocked</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardFooter className="flex-col items-start gap-1 text-sm">
+            <div className="line-clamp-1 flex gap-2 font-medium">
+              {dashboard.runtime_health.snapshot.queries_total.toLocaleString()} total queries
+            </div>
+            <div className="text-muted-foreground">
+              Observed by this node
+            </div>
+          </CardFooter>
+        </Card>
+
+        {/* Devices */}
+        <Card className="">
+          <CardHeader>
+            <CardDescription>Devices</CardDescription>
+            <CardTitle className="text-2xl font-semibold tabular-nums">
+              {dashboard.device_count.toLocaleString()}
+            </CardTitle>
+            <CardAction>
+              <Badge variant="outline">visible</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardFooter className="flex-col items-start gap-1 text-sm">
+            <div className="line-clamp-1 flex gap-2 font-medium">
+              Unique devices
+            </div>
+            <div className="text-muted-foreground">
+              Currently visible to the control plane
+            </div>
+          </CardFooter>
+        </Card>
+      </div>
+
+      {/* ---------- Domain Lists ---------- */}
+      <div className="grid grid-cols-1 gap-4 px-4 lg:px-6 xl:grid-cols-2">
+        {/* Top Queried Domains */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Queried Domains</CardTitle>
+            <CardDescription>Recent destinations seen by the resolver over the last day</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Domain</TableHead>
+                  <TableHead className="text-right">Queries</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dashboard.domain_insights.top_queried_domains.length === 0 ? (
+                  <EmptyRow colSpan={2}>
+                    Query activity will appear here once devices begin sending traffic through Cogwheel.
+                  </EmptyRow>
+                ) : (
+                  dashboard.domain_insights.top_queried_domains.map((entry) => (
+                    <TableRow key={entry.domain}>
+                      <TableCell className="font-medium">{entry.domain}</TableCell>
+                      <TableCell className="text-right tabular-nums">{entry.count}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+
+        {/* Top Blocked Domains */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Blocked Domains</CardTitle>
+            <CardDescription>Where protection is actively stepping in right now</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Domain</TableHead>
+                  <TableHead className="text-right">Blocked</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
+                  <EmptyRow colSpan={2}>
+                    No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
+                  </EmptyRow>
+                ) : (
+                  dashboard.domain_insights.top_blocked_domains.map((entry) => (
+                    <TableRow key={entry.domain}>
+                      <TableCell className="font-medium">{entry.domain}</TableCell>
+                      <TableCell className="text-right">
+                        <Badge variant="destructive">{entry.count}</Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ---------- Error Banner ---------- */}
+      {error ? (
+        <div className="px-4 lg:px-6">
+          <Card className="border-destructive/30 bg-destructive/10 text-destructive">
+            <CardContent>{error}</CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* ---------- Resolver Access & Resolver Summary ---------- */}
+      <div className="grid grid-cols-1 gap-4 px-4 lg:px-6 lg:grid-cols-2">
+        {/* Resolver Access */}
+        <Card>
+          <CardHeader>
+            <CardTitle>How to Connect Devices</CardTitle>
+            <CardDescription>
+              Use one of these DNS targets on phones, laptops, TVs, or routers that should use this Cogwheel instance
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Target</TableHead>
+                  <TableHead className="text-right">Address</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {resolverAccess.dns_targets.length === 0 ? (
+                  <EmptyRow colSpan={2}>
+                    Resolver targets will appear here once the control plane reports reachable DNS addresses.
+                  </EmptyRow>
+                ) : (
+                  resolverAccess.dns_targets.map((target) => (
+                    <TableRow key={target}>
+                      <TableCell className="font-medium">DNS server</TableCell>
+                      <TableCell className="text-right font-mono font-semibold">{target}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+                <TableRow>
+                  <TableCell className="font-medium">Tailscale</TableCell>
+                  <TableCell className="text-right font-mono text-muted-foreground">
+                    {resolverAccess.tailscale_ip ?? "Not available on this node"}
+                  </TableCell>
+                </TableRow>
+                {ipv6DnsTarget ? (
+                  <TableRow>
+                    <TableCell className="font-medium">IPv6 DNS</TableCell>
+                    <TableCell className="text-right font-mono font-semibold break-all">
+                      {ipv6DnsTarget}
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+
+            {resolverAccess.notes.length > 0 ? (
+              <p className="mt-4 text-sm text-muted-foreground">
+                {resolverAccess.notes.join(" ")}
+              </p>
             ) : null}
-          </div>
+
+            {/* Platform guides */}
+            <div className="mt-4">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Platform</TableHead>
+                    <TableHead>Instructions</TableHead>
+                    <TableHead className="text-right">DNS</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {platformGuides.map((platform) => (
+                    <TableRow key={platform.title}>
+                      <TableCell className="font-medium">{platform.title}</TableCell>
+                      <TableCell className="text-muted-foreground max-w-[300px] whitespace-normal">
+                        {platform.detail}
+                      </TableCell>
+                      <TableCell className="text-right font-mono font-semibold">
+                        {platform.target}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
         </Card>
 
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5 bg-muted/30">
-            <CardTitle>Resolver summary</CardTitle>
-            <CardDescription className="mt-1">
-              Small operational details that are still useful on the main
-              dashboard.
+        {/* Resolver Summary */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Resolver Summary</CardTitle>
+            <CardDescription>
+              Operational details from the running resolver instance
             </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6 text-sm">
-            <Row label="Protection" value={dashboard.protection_status} />
-            <Row
-              label="Active ruleset"
-              value={
-                dashboard.active_ruleset?.hash.slice(0, 12) ?? "None"
-              }
-            />
-            <Row
-              label="Cache hits"
-              value={String(
-                dashboard.runtime_health.snapshot.cache_hits_total,
-              )}
-            />
-            <Row
-              label="Fallback served"
-              value={String(
-                dashboard.runtime_health.snapshot.fallback_served_total,
-              )}
-            />
-            <Row
-              label="Runtime notes"
-              value={String(dashboard.runtime_health.notes.length)}
-            />
-          </div>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Metric</TableHead>
+                  <TableHead className="text-right">Value</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="font-medium">Protection</TableCell>
+                  <TableCell className="text-right">
+                    <Badge variant={protectionBadgeVariant}>{dashboard.protection_status}</Badge>
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Active ruleset</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {dashboard.active_ruleset?.hash.slice(0, 12) ?? "None"}
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Cache hits</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {dashboard.runtime_health.snapshot.cache_hits_total.toLocaleString()}
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Fallback served</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {dashboard.runtime_health.snapshot.fallback_served_total.toLocaleString()}
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Runtime notes</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {dashboard.runtime_health.notes.length}
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </CardContent>
         </Card>
-      </section>
+      </div>
 
-      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5 bg-muted/30">
-            <CardTitle>Recent risky events</CardTitle>
-            <CardDescription className="mt-1">
-              Newest high-signal security events without pulling in device
-              management controls.
+      {/* ---------- Security Events ---------- */}
+      <div className="px-4 lg:px-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Recent Risky Events</CardTitle>
+            <CardDescription>
+              High-signal security events from the resolver
             </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6">
-            {dashboard.recent_security_events.length === 0 ? (
-              <EmptyState>No risky DNS events recorded yet.</EmptyState>
-            ) : (
-              dashboard.recent_security_events.slice(0, 4).map((event) => (
-                <ListRow
-                  key={event.id}
-                  tone="muted"
-                  title={event.domain}
-                  detail={`${event.device_name ?? "Unassigned device"} on ${event.client_ip}`}
-                  right={<Badge>{event.severity}</Badge>}
-                />
-              ))
-            )}
-          </div>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Domain</TableHead>
+                  <TableHead>Device</TableHead>
+                  <TableHead>Client IP</TableHead>
+                  <TableHead className="text-right">Severity</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dashboard.recent_security_events.length === 0 ? (
+                  <EmptyRow colSpan={4}>
+                    No risky DNS events recorded yet.
+                  </EmptyRow>
+                ) : (
+                  dashboard.recent_security_events.slice(0, 4).map((event) => (
+                    <TableRow key={event.id}>
+                      <TableCell className="font-medium">{event.domain}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {event.device_name ?? "Unassigned device"}
+                      </TableCell>
+                      <TableCell className="font-mono text-muted-foreground">
+                        {event.client_ip}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Badge variant={event.severity === "high" ? "destructive" : "secondary"}>
+                          {event.severity}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
         </Card>
-      </section>
+      </div>
 
-      {state === "loading" ? (
-        <div className="text-sm text-muted-foreground">
-          Loading control plane data...
-        </div>
-      ) : null}
-      {state === "ready" ? (
-        <div className="text-sm text-muted-foreground">
-          {enabledBlocklists.length} enabled blocklists and{" "}
-          {settings.devices.length} named devices.
-        </div>
-      ) : null}
+      {/* ---------- Footer Status ---------- */}
+      <div className="px-4 lg:px-6">
+        {state === "loading" ? (
+          <p className="text-sm text-muted-foreground">
+            Loading control plane data...
+          </p>
+        ) : null}
+        {state === "ready" ? (
+          <p className="text-sm text-muted-foreground">
+            {enabledBlocklists.length} enabled blocklists and{" "}
+            {settings.devices.length} named devices.
+          </p>
+        ) : null}
+      </div>
     </>
   );
 }

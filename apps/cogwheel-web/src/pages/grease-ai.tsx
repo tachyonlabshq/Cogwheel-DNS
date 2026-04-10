@@ -1,8 +1,22 @@
 import { useMemo } from "react";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { ListRow, CompactStat } from "@/components/shared";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 export default function GreaseAiPage() {
   const { dashboard, settings, latencyBudget } = useCogwheel();
@@ -23,17 +37,14 @@ export default function GreaseAiPage() {
       {
         label: "Classifier confidence",
         value: Math.min(0.35 + blockedRatio * 1.8, 0.96),
-        tint: "from-sky-400/80 to-cyan-300/80",
       },
       {
         label: "Risk memory",
         value: Math.min(0.22 + riskyEventRatio * 0.7, 0.92),
-        tint: "from-amber-400/85 to-orange-300/80",
       },
       {
         label: "Latency headroom",
         value: latencyHeadroom,
-        tint: "from-emerald-400/85 to-lime-300/80",
       },
     ];
   }, [
@@ -44,139 +55,172 @@ export default function GreaseAiPage() {
   ]);
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-      <Card className="overflow-hidden p-0">
-        <div className="border-b border-border bg-muted/30 px-6 py-5">
-          <CardTitle>Grease-AI</CardTitle>
-          <CardDescription className="mt-1">
-            A calm classifier workspace that shows live learning signals without
-            overwhelming the rest of the control plane.
-          </CardDescription>
-        </div>
-        <div className="grid gap-4 px-6 py-6 lg:grid-cols-[0.92fr_1.08fr]">
-          <div className="space-y-3">
-            <div className="text-sm font-medium text-foreground">
-              Learning pulse
-            </div>
-            <div className="space-y-3">
+    <div className="px-4 lg:px-6">
+      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+        {/* Left: Classifier workspace */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Grease-AI Classifier</CardTitle>
+            <CardDescription>
+              Live learning signals and classifier workspace
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {/* Learning pulse */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium">Learning Pulse</h4>
               {greaseAiSignals.map((signal) => (
-                <ListRow
-                  key={signal.label}
-                  tone="muted"
-                  title={signal.label}
-                  right={
+                <div key={signal.label} className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>{signal.label}</span>
                     <span className="text-muted-foreground">
                       {Math.round(signal.value * 100)}%
                     </span>
-                  }
-                  footer={
-                    <div className="mt-3 h-3 overflow-hidden rounded-full bg-muted/60">
-                      <div
-                        className={`h-full rounded-full bg-gradient-to-r ${signal.tint}`}
-                        style={{
-                          width: `${Math.max(signal.value * 100, 6)}%`,
-                        }}
-                      />
-                    </div>
-                  }
-                />
-              ))}
-            </div>
-          </div>
-          <div className="rounded-2xl border border-border bg-background p-5">
-            <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">
-              Classifier animation
-            </div>
-            <div className="mt-4 grid gap-3">
-              {[0, 1, 2, 3, 4].map((row) => (
-                <div key={row} className="grid grid-cols-8 gap-2">
-                  {greaseAiSignals.map((signal, index) => (
-                    <div
-                      key={`${row}-${signal.label}-${index}`}
-                      className="h-5 rounded-full bg-gradient-to-r from-primary/10 via-primary/40 to-secondary/30"
-                      style={{
-                        opacity: Math.max(
-                          0.2,
-                          signal.value - row * 0.12 + index * 0.04,
-                        ),
-                        animation: `pulse-bar ${2 + row * 0.4}s ease-in-out ${row * 0.3 + index * 0.1}s infinite alternate`,
-                        "--bar-opacity": Math.max(
-                          0.2,
-                          signal.value - row * 0.12 + index * 0.04,
-                        ),
-                      } as React.CSSProperties}
-                    />
-                  ))}
-                  <div className="h-5 rounded-full bg-background/80" />
-                  <div className="h-5 rounded-full bg-background/60" />
-                  <div className="h-5 rounded-full bg-background/80" />
-                  <div className="h-5 rounded-full bg-background/60" />
-                  <div className="h-5 rounded-full bg-background/80" />
+                  </div>
+                  <Progress value={signal.value * 100} />
                 </div>
               ))}
             </div>
-            <div className="mt-4 text-sm text-muted-foreground">
-              The bars brighten as more DNS activity arrives, blocked decisions
-              climb, and the runtime stays inside latency budget.
+
+            {/* Classifier animation visualization */}
+            <div className="rounded-lg border border-border p-5">
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">
+                Classifier animation
+              </div>
+              <div className="mt-4 grid gap-3">
+                {[0, 1, 2, 3, 4].map((row) => (
+                  <div key={row} className="grid grid-cols-8 gap-2">
+                    {greaseAiSignals.map((signal, index) => (
+                      <div
+                        key={`${row}-${signal.label}-${index}`}
+                        className="h-5 rounded-full bg-gradient-to-r from-primary/10 via-primary/40 to-secondary/30"
+                        style={{
+                          opacity: Math.max(
+                            0.2,
+                            signal.value - row * 0.12 + index * 0.04,
+                          ),
+                          animation: `pulse-bar ${2 + row * 0.4}s ease-in-out ${row * 0.3 + index * 0.1}s infinite alternate`,
+                          "--bar-opacity": Math.max(
+                            0.2,
+                            signal.value - row * 0.12 + index * 0.04,
+                          ),
+                        } as React.CSSProperties}
+                      />
+                    ))}
+                    <div className="h-5 rounded-full bg-background/80" />
+                    <div className="h-5 rounded-full bg-background/60" />
+                    <div className="h-5 rounded-full bg-background/80" />
+                    <div className="h-5 rounded-full bg-background/60" />
+                    <div className="h-5 rounded-full bg-background/80" />
+                  </div>
+                ))}
+              </div>
+              <p className="mt-4 text-sm text-muted-foreground">
+                The bars brighten as more DNS activity arrives, blocked decisions
+                climb, and the runtime stays inside latency budget.
+              </p>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Right: Stats cards grid */}
+        <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Mode</CardDescription>
+                <CardTitle className="text-2xl">
+                  {settings.classifier.mode}
+                </CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Threshold</CardDescription>
+                <CardTitle className="text-2xl">
+                  {settings.classifier.threshold.toFixed(2)}
+                </CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Queries observed</CardDescription>
+                <CardTitle className="text-2xl">
+                  {dashboard.runtime_health.snapshot.queries_total.toLocaleString()}
+                </CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Blocked queries</CardDescription>
+                <CardTitle className="text-2xl">
+                  {dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}
+                </CardTitle>
+              </CardHeader>
+            </Card>
           </div>
+
+          {/* Latency budgets table */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Latency Budgets</CardTitle>
+              <CardDescription>
+                Live hot-path budget checks after the latest traffic observed by
+                this resolver
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Path</TableHead>
+                    <TableHead>Target p50</TableHead>
+                    <TableHead>Observed</TableHead>
+                    <TableHead>Samples</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {latencyBudget.checks.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={5}
+                        className="h-24 text-center text-muted-foreground"
+                      >
+                        No latency budget checks available yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    latencyBudget.checks.map((check) => (
+                      <TableRow key={check.label}>
+                        <TableCell className="font-medium">
+                          {check.label}
+                        </TableCell>
+                        <TableCell>
+                          {check.target_p50_ms.toFixed(1)} ms
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {check.observed_ms.toFixed(3)} ms
+                        </TableCell>
+                        <TableCell>{check.sample_count}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              check.status === "ok" ? "secondary" : "default"
+                            }
+                          >
+                            {check.status}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
         </div>
-      </Card>
-
-      <div className="grid gap-6">
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border bg-muted/30 px-6 py-5">
-            <CardTitle>Classifier stats</CardTitle>
-            <CardDescription className="mt-1">
-              Operational numbers behind the current learning pulse.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6 sm:grid-cols-2">
-            <CompactStat label="Mode" value={settings.classifier.mode} />
-            <CompactStat
-              label="Threshold"
-              value={settings.classifier.threshold.toFixed(2)}
-            />
-            <CompactStat
-              label="Queries observed"
-              value={dashboard.runtime_health.snapshot.queries_total.toLocaleString()}
-            />
-            <CompactStat
-              label="Blocked queries"
-              value={dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}
-            />
-          </div>
-        </Card>
-
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border bg-muted/30 px-6 py-5">
-            <CardTitle>Latency budgets</CardTitle>
-            <CardDescription className="mt-1">
-              Live hot-path budget checks after the latest traffic observed by
-              this resolver.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6 lg:grid-cols-3">
-            {latencyBudget.checks.map((check) => (
-              <ListRow
-                key={check.label}
-                tone="muted"
-                title={check.label}
-                detail={`Target ${check.target_p50_ms.toFixed(1)} ms \u2022 ${check.sample_count} samples`}
-                right={
-                  <>
-                    <Badge>{check.status}</Badge>
-                    <div className="mt-2 text-xl font-semibold text-foreground">
-                      {check.observed_ms.toFixed(3)} ms
-                    </div>
-                  </>
-                }
-                rightClassName="text-right"
-              />
-            ))}
-          </div>
-        </Card>
       </div>
-    </section>
+    </div>
   );
 }

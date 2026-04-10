@@ -3,9 +3,25 @@ import { useCogwheel } from "@/contexts/cogwheel-context";
 import { api, type DeviceServiceOverride, type SettingsSummary } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ListRow, EmptyState } from "@/components/shared";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 export default function DevicesPage() {
   const { settings, busyAction, setBusyAction, pushToast, load } =
@@ -254,134 +270,227 @@ export default function DevicesPage() {
   }
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-      <Card id="devices-page" className="overflow-hidden p-0">
-        <div className="border-b border-border bg-muted/30 px-6 py-5">
-          <CardTitle>Devices</CardTitle>
-          <CardDescription className="mt-1">
-            Give each device a clear name, then decide whether it keeps the
-            household default or receives a saved profile.
-          </CardDescription>
-        </div>
-        <div className="grid gap-5 px-6 py-6">
-          <div className="grid gap-3 lg:grid-cols-2">
-            <Input
-              value={deviceName}
-              onChange={(event) => setDeviceName(event.target.value)}
-              placeholder="Kitchen iPad"
-            />
-            <Input
-              value={deviceIpAddress}
-              onChange={(event) => setDeviceIpAddress(event.target.value)}
-              placeholder="192.168.1.42"
-            />
-          </div>
-          <div className="grid gap-3 lg:grid-cols-2">
-            <select
-              className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-              value={devicePolicyMode}
-              onChange={(event) =>
-                setDevicePolicyMode(
-                  event.target.value as "global" | "custom",
-                )
-              }
-            >
-              <option value="global">Household default</option>
-              <option value="custom">Custom assignment</option>
-            </select>
-            <select
-              className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-              value={deviceProfileOverride}
-              onChange={(event) =>
-                setDeviceProfileOverride(event.target.value)
-              }
-              disabled={devicePolicyMode !== "custom"}
-            >
-              <option value="">Choose a saved profile</option>
-              {settings.block_profiles.map((profile) => (
-                <option key={profile.id} value={profile.name}>
-                  {profile.emoji} {profile.name}
-                </option>
-              ))}
-            </select>
-            <select
-              className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-              value={deviceProtectionOverride}
-              onChange={(event) =>
-                setDeviceProtectionOverride(
-                  event.target.value as "inherit" | "bypass",
-                )
-              }
-              disabled={devicePolicyMode !== "custom"}
-            >
-              <option value="inherit">Keep blocking on</option>
-              <option value="bypass">Bypass blocking</option>
-            </select>
-            <Input
-              value={deviceAllowedDomains}
-              onChange={(event) =>
-                setDeviceAllowedDomains(event.target.value)
-              }
-              placeholder="school.site, printer.local"
-              disabled={devicePolicyMode !== "custom"}
-            />
-          </div>
-          <div className="rounded-2xl border border-border bg-muted/20 p-4">
-            <div className="flex flex-col gap-1">
-              <div className="text-sm font-medium text-foreground">
-                Service override
+    <div className="px-4 lg:px-6">
+      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+        {/* Left: Device form card */}
+        <Card>
+          <CardHeader>
+            <CardTitle>{deviceId ? "Edit Device" : "Add Device"}</CardTitle>
+            <CardDescription>
+              Register a device with a name and IP address
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="device-name">Device name</Label>
+                <Input
+                  id="device-name"
+                  value={deviceName}
+                  onChange={(event) => setDeviceName(event.target.value)}
+                  placeholder="Kitchen iPad"
+                />
               </div>
-              <div className="text-sm text-muted-foreground">
-                Add a focused allow or block rule for a known service when this
-                device needs a small exception.
+              <div className="space-y-2">
+                <Label htmlFor="device-ip">IP Address</Label>
+                <Input
+                  id="device-ip"
+                  value={deviceIpAddress}
+                  onChange={(event) => setDeviceIpAddress(event.target.value)}
+                  placeholder="192.168.1.42"
+                />
               </div>
             </div>
-            <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
-              <select
-                className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-                value={deviceServiceOverrideId}
-                onChange={(event) =>
-                  setDeviceServiceOverrideId(event.target.value)
-                }
-                disabled={devicePolicyMode !== "custom"}
-              >
-                <option value="">Select service override</option>
-                {settings.services.map((service) => (
-                  <option
-                    key={service.manifest.service_id}
-                    value={service.manifest.service_id}
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="device-policy">Policy mode</Label>
+                <select
+                  id="device-policy"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={devicePolicyMode}
+                  onChange={(event) =>
+                    setDevicePolicyMode(
+                      event.target.value as "global" | "custom",
+                    )
+                  }
+                >
+                  <option value="global">Household default</option>
+                  <option value="custom">Custom assignment</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="device-profile">Profile override</Label>
+                <select
+                  id="device-profile"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={deviceProfileOverride}
+                  onChange={(event) =>
+                    setDeviceProfileOverride(event.target.value)
+                  }
+                  disabled={devicePolicyMode !== "custom"}
+                >
+                  <option value="">Choose a saved profile</option>
+                  {settings.block_profiles.map((profile) => (
+                    <option key={profile.id} value={profile.name}>
+                      {profile.emoji} {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="device-protection">Protection</Label>
+                <select
+                  id="device-protection"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={deviceProtectionOverride}
+                  onChange={(event) =>
+                    setDeviceProtectionOverride(
+                      event.target.value as "inherit" | "bypass",
+                    )
+                  }
+                  disabled={devicePolicyMode !== "custom"}
+                >
+                  <option value="inherit">Keep blocking on</option>
+                  <option value="bypass">Bypass blocking</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="device-allowed">Allowed domains</Label>
+                <Input
+                  id="device-allowed"
+                  value={deviceAllowedDomains}
+                  onChange={(event) =>
+                    setDeviceAllowedDomains(event.target.value)
+                  }
+                  placeholder="school.site, printer.local"
+                  disabled={devicePolicyMode !== "custom"}
+                />
+              </div>
+            </div>
+
+            {/* Service override section */}
+            <div className="space-y-3 rounded-lg border border-border p-4">
+              <div className="space-y-1">
+                <div className="text-sm font-medium">Service override</div>
+                <p className="text-sm text-muted-foreground">
+                  Add a focused allow or block rule for a known service when this
+                  device needs a small exception.
+                </p>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={deviceServiceOverrideId}
+                  onChange={(event) =>
+                    setDeviceServiceOverrideId(event.target.value)
+                  }
+                  disabled={devicePolicyMode !== "custom"}
+                >
+                  <option value="">Select service override</option>
+                  {settings.services.map((service) => (
+                    <option
+                      key={service.manifest.service_id}
+                      value={service.manifest.service_id}
+                    >
+                      {service.manifest.display_name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={deviceServiceOverrideMode}
+                  onChange={(event) =>
+                    setDeviceServiceOverrideMode(
+                      event.target.value as "allow" | "block",
+                    )
+                  }
+                  disabled={devicePolicyMode !== "custom"}
+                >
+                  <option value="allow">Allow service</option>
+                  <option value="block">Block service</option>
+                </select>
+                <Button
+                  variant="outline"
+                  onClick={addDeviceServiceOverride}
+                  disabled={
+                    devicePolicyMode !== "custom" ||
+                    !deviceServiceOverrideId ||
+                    deviceServiceOverrideIsNoop
+                  }
+                >
+                  Add service rule
+                </Button>
+              </div>
+            </div>
+
+            {/* Service override preview */}
+            {deviceServiceOverrideId && deviceServiceOverridePreview ? (
+              <div className="rounded-lg border border-border p-4 text-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">
+                      {deviceServiceOverridePreview.displayName}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {deviceServiceOverridePreview.riskNotes}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge>{deviceServiceOverrideMode}</Badge>
+                    <Badge variant="secondary">
+                      {deviceServiceOverridePreview.category}
+                    </Badge>
+                    <Badge variant="secondary">
+                      {deviceServiceOverridePreview.domains.length} domains
+                    </Badge>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {deviceServiceOverridePreview.sampleDomains.map((domain) => (
+                    <Badge key={domain} variant="outline">
+                      {domain}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {/* Queued service overrides */}
+            {deviceServiceOverrides.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {deviceServiceOverrides.map((override) => (
+                  <button
+                    key={`${override.service_id}-${override.mode}`}
+                    type="button"
+                    title={describeDeviceServiceOverride(override.service_id)}
+                    className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() =>
+                      removeDeviceServiceOverride(override.service_id)
+                    }
                   >
-                    {service.manifest.display_name}
-                  </option>
+                    {formatDeviceServiceOverride(
+                      override.service_id,
+                      override.mode,
+                    )}{" "}
+                    x
+                  </button>
                 ))}
-              </select>
-              <select
-                className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-                value={deviceServiceOverrideMode}
-                onChange={(event) =>
-                  setDeviceServiceOverrideMode(
-                    event.target.value as "allow" | "block",
-                  )
-                }
-                disabled={devicePolicyMode !== "custom"}
-              >
-                <option value="allow">Allow service</option>
-                <option value="block">Block service</option>
-              </select>
-              <Button
-                variant="outline"
-                onClick={addDeviceServiceOverride}
-                disabled={
-                  devicePolicyMode !== "custom" ||
-                  !deviceServiceOverrideId ||
-                  deviceServiceOverrideIsNoop
-                }
-              >
-                Add service rule
-              </Button>
-            </div>
-          </div>
-          <div className="flex flex-wrap justify-end gap-3">
+              </div>
+            ) : null}
+
+            {/* Household default notice */}
+            {devicePolicyMode !== "custom" ? (
+              <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+                This device will follow the household default until you switch it
+                to a custom assignment.
+              </p>
+            ) : null}
+          </CardContent>
+          <CardFooter className="justify-end gap-2">
             {deviceId ? (
               <Button variant="ghost" onClick={resetDeviceForm}>
                 Cancel
@@ -401,151 +510,89 @@ export default function DevicesPage() {
                   ? "Save device"
                   : "Add device"}
             </Button>
-          </div>
-          {devicePolicyMode !== "custom" ? (
-            <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
-              This device will follow the household default until you switch it
-              to a custom assignment.
-            </div>
-          ) : null}
-          {deviceServiceOverrideId && deviceServiceOverridePreview ? (
-            <div className="rounded-2xl border border-border bg-background p-4 text-sm">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="font-medium">
-                    {deviceServiceOverridePreview.displayName}
-                  </div>
-                  <div className="mt-1 text-muted-foreground">
-                    {deviceServiceOverridePreview.riskNotes}
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <Badge>{deviceServiceOverrideMode}</Badge>
-                  <Badge>{deviceServiceOverridePreview.category}</Badge>
-                  <Badge>
-                    {deviceServiceOverridePreview.domains.length} domains
-                  </Badge>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {deviceServiceOverridePreview.sampleDomains.map((domain) => (
-                  <Badge key={domain}>{domain}</Badge>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {deviceServiceOverrides.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {deviceServiceOverrides.map((override) => (
-                <button
-                  key={`${override.service_id}-${override.mode}`}
-                  type="button"
-                  title={describeDeviceServiceOverride(override.service_id)}
-                  className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() =>
-                    removeDeviceServiceOverride(override.service_id)
-                  }
-                >
-                  {formatDeviceServiceOverride(
-                    override.service_id,
-                    override.mode,
-                  )}{" "}
-                  x
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </Card>
+          </CardFooter>
+        </Card>
 
-      <div className="grid gap-6">
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border bg-muted/30 px-6 py-5">
-            <CardTitle>Saved devices</CardTitle>
-            <CardDescription className="mt-1">
-              Detected and named devices stay easy to scan, edit, and reassign.
+        {/* Right: Saved devices table */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Devices</CardTitle>
+            <CardDescription>
+              Named devices tracked by the control plane
             </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6">
-            {settings.devices.length === 0 ? (
-              <EmptyState>
-                No devices have been named yet. Start with the devices the
-                household will recognize fastest.
-              </EmptyState>
-            ) : (
-              settings.devices.map((device) => (
-                <ListRow
-                  key={device.id}
-                  title={device.name}
-                  detail={device.ip_address}
-                  right={
-                    <Badge>
-                      {device.policy_mode === "custom" ? "Custom" : "Default"}
-                    </Badge>
-                  }
-                  footer={
-                    <>
-                      <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                        <Badge>
-                          {device.blocklist_profile_override ??
-                            "Household default"}
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>IP Address</TableHead>
+                  <TableHead>Policy</TableHead>
+                  <TableHead>Profile</TableHead>
+                  <TableHead>Protection</TableHead>
+                  <TableHead></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {settings.devices.length === 0 ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={6}
+                      className="h-24 text-center text-muted-foreground"
+                    >
+                      No devices have been named yet. Start with the devices the
+                      household will recognize fastest.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  settings.devices.map((device) => (
+                    <TableRow key={device.id}>
+                      <TableCell className="font-medium">
+                        {device.name}
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">
+                        {device.ip_address}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            device.policy_mode === "custom"
+                              ? "default"
+                              : "secondary"
+                          }
+                        >
+                          {device.policy_mode === "custom"
+                            ? "Custom"
+                            : "Default"}
                         </Badge>
-                        <Badge>
+                      </TableCell>
+                      <TableCell>
+                        {device.blocklist_profile_override ?? "Default"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline">
                           {device.protection_override === "bypass"
-                            ? "Bypass enabled"
-                            : "Blocking on"}
+                            ? "Bypass"
+                            : "Active"}
                         </Badge>
-                        <Badge>
-                          {device.allowed_domains.length} allowlisted
-                        </Badge>
-                        <Badge>
-                          {device.service_overrides.length} service rules
-                        </Badge>
-                      </div>
-                      <div className="mt-4 flex justify-end">
+                      </TableCell>
+                      <TableCell>
                         <Button
                           variant="ghost"
                           size="sm"
                           onClick={() => startDeviceEdit(device)}
                         >
-                          Edit device
+                          Edit
                         </Button>
-                      </div>
-                    </>
-                  }
-                />
-              ))
-            )}
-          </div>
-        </Card>
-
-        <Card className="overflow-hidden p-0">
-          <div className="border-b border-border bg-muted/30 px-6 py-5">
-            <CardTitle>Assignment help</CardTitle>
-            <CardDescription className="mt-1">
-              Use friendly names from saved block profiles so the household can
-              tell what each device is using at a glance.
-            </CardDescription>
-          </div>
-          <div className="grid gap-3 px-6 py-6 text-sm text-muted-foreground">
-            {settings.block_profiles.length === 0 ? (
-              <EmptyState>
-                Create a block profile first, then come back here to assign it
-                to a device.
-              </EmptyState>
-            ) : (
-              settings.block_profiles.map((profile) => (
-                <ListRow
-                  key={profile.id}
-                  tone="muted"
-                  title={`${profile.emoji || "\u25CC"} ${profile.name}`}
-                  detail={profile.description}
-                />
-              ))
-            )}
-          </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
         </Card>
       </div>
-    </section>
+    </div>
   );
 }

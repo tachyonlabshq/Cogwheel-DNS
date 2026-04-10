@@ -8,12 +8,28 @@ import {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { ListRow } from "@/components/shared";
-
-type SettingsView = "basic" | "advanced";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 export default function SettingsPage() {
   const {
@@ -36,7 +52,6 @@ export default function SettingsPage() {
     handleRuntimeHealthCheck,
   } = useCogwheel();
 
-  const [settingsView, setSettingsView] = useState<SettingsView>("basic");
   const [classifierThreshold, setClassifierThreshold] = useState("0.92");
   const [notificationEnabled, setNotificationEnabled] = useState(false);
   const [notificationWebhookUrl, setNotificationWebhookUrl] = useState("");
@@ -590,528 +605,748 @@ export default function SettingsPage() {
   }
 
   return (
-    <section className="grid gap-6">
-      <Card className="overflow-hidden p-0">
-        <div className="border-b border-border px-6 py-5">
-          <CardTitle>Settings</CardTitle>
-          <CardDescription className="mt-1">
-            Start with the few settings most homes actually change, then open
-            advanced controls only when you need them.
-          </CardDescription>
-          <div className="mt-5 inline-flex rounded-xl border border-border bg-muted/40 p-1">
-            <Button
-              variant={settingsView === "basic" ? "default" : "ghost"}
-              size="sm"
-              className="rounded-lg"
-              onClick={() => setSettingsView("basic")}
-            >
-              Everyday
-            </Button>
-            <Button
-              variant={settingsView === "advanced" ? "default" : "ghost"}
-              size="sm"
-              className="rounded-lg"
-              onClick={() => setSettingsView("advanced")}
-            >
-              Advanced
-            </Button>
-          </div>
-          <div className="mt-3 text-sm text-muted-foreground">
-            {settingsView === "advanced"
-              ? "Advanced mode includes sync, Tailscale, classifier tuning, operator feeds, and audit history."
-              : "Everyday mode keeps the page focused on alerts, blocklists, and common services."}
-          </div>
-        </div>
-        {settingsView === "advanced" ? (
-          <div className="mt-5 grid gap-4 px-6 pb-6 lg:grid-cols-2">
-            <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-              <div className="font-medium">Sync and replication</div>
-              <div className="mt-2 grid gap-2 text-muted-foreground">
+    <div className="px-4 lg:px-6 space-y-6">
+      <Tabs defaultValue="everyday">
+        <TabsList>
+          <TabsTrigger value="everyday">Everyday</TabsTrigger>
+          <TabsTrigger value="advanced">Advanced</TabsTrigger>
+        </TabsList>
+
+        {/* ---------------------------------------------------------------- */}
+        {/* Everyday tab                                                      */}
+        {/* ---------------------------------------------------------------- */}
+        <TabsContent value="everyday" className="space-y-6">
+          {/* Alert delivery card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Alert delivery</CardTitle>
+              <CardDescription>
+                Send high-severity security alerts to an external webhook
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">
+                  {notificationEnabled
+                    ? `Webhook ${notificationMinSeverity}+`
+                    : "Disabled"}
+                </Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="notification-enabled"
+                  checked={notificationEnabled}
+                  onCheckedChange={setNotificationEnabled}
+                />
+                <Label htmlFor="notification-enabled">
+                  Enable outbound alert notifications
+                </Label>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_170px]">
+                <div className="space-y-2">
+                  <Label htmlFor="webhook-url">Webhook URL</Label>
+                  <Input
+                    id="webhook-url"
+                    value={notificationWebhookUrl}
+                    onChange={(event) =>
+                      setNotificationWebhookUrl(event.target.value)
+                    }
+                    placeholder="https://hooks.example.com/cogwheel"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="min-severity">Min severity</Label>
+                  <select
+                    id="min-severity"
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={notificationMinSeverity}
+                    onChange={(event) =>
+                      setNotificationMinSeverity(
+                        event.target.value as "medium" | "high" | "critical",
+                      )
+                    }
+                  >
+                    <option value="medium">Medium+</option>
+                    <option value="high">High+</option>
+                    <option value="critical">Critical only</option>
+                  </select>
+                </div>
+              </div>
+            </CardContent>
+            <CardFooter className="justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => void handleNotificationTest()}
+                disabled={
+                  busyAction === "notifications-test" ||
+                  !notificationWebhookUrl
+                }
+              >
+                Send test
+              </Button>
+              <Button
+                onClick={() => void handleNotificationSave()}
+                disabled={busyAction === "notifications-save"}
+              >
+                Save alerts
+              </Button>
+            </CardFooter>
+          </Card>
+
+          {/* Sources card with Table for blocklists */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Sources</CardTitle>
+              <CardDescription>
+                Imported blocklists and their refresh schedules
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-3 rounded-lg border border-border p-4">
+                <div className="text-sm font-medium">Add blocklist</div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="bl-name">Name</Label>
+                    <Input
+                      id="bl-name"
+                      value={blocklistName}
+                      onChange={(event) =>
+                        setBlocklistName(event.target.value)
+                      }
+                      placeholder="Human-readable name"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="bl-url">Source URL</Label>
+                    <Input
+                      id="bl-url"
+                      value={blocklistUrl}
+                      onChange={(event) =>
+                        setBlocklistUrl(event.target.value)
+                      }
+                      placeholder="Source URL or data: URL"
+                    />
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="bl-profile">Profile</Label>
+                    <select
+                      id="bl-profile"
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      value={blocklistProfile}
+                      onChange={(event) =>
+                        setBlocklistProfile(event.target.value)
+                      }
+                    >
+                      <option value="custom">Custom</option>
+                      <option value="essential">Essential</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="aggressive">Aggressive</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="bl-strictness">Strictness</Label>
+                    <select
+                      id="bl-strictness"
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      value={blocklistStrictness}
+                      onChange={(event) =>
+                        setBlocklistStrictness(
+                          event.target.value as
+                            | "strict"
+                            | "balanced"
+                            | "relaxed",
+                        )
+                      }
+                    >
+                      <option value="strict">Strict</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="relaxed">Relaxed</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="bl-interval">Refresh (min)</Label>
+                    <Input
+                      id="bl-interval"
+                      value={blocklistInterval}
+                      onChange={(event) =>
+                        setBlocklistInterval(event.target.value)
+                      }
+                      placeholder="60"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => void handleBlocklistCreate()}
+                    disabled={
+                      !blocklistName ||
+                      !blocklistUrl ||
+                      busyAction === "create-blocklist"
+                    }
+                  >
+                    Add blocklist
+                  </Button>
+                </div>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Profile</TableHead>
+                    <TableHead>Refresh</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {settings.blocklists.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={5}
+                        className="h-24 text-center text-muted-foreground"
+                      >
+                        No blocklists configured yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    settings.blocklists.map((source) => (
+                      <TableRow key={source.id}>
+                        <TableCell className="font-medium">
+                          {source.name}
+                        </TableCell>
+                        <TableCell>{source.profile}</TableCell>
+                        <TableCell>
+                          {source.refresh_interval_minutes}m
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              source.enabled ? "default" : "secondary"
+                            }
+                          >
+                            {source.enabled ? "Enabled" : "Disabled"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              void handleBlocklistToggle(
+                                source.id,
+                                !source.enabled,
+                              )
+                            }
+                            disabled={
+                              busyAction ===
+                              `blocklist-toggle-${source.id}`
+                            }
+                          >
+                            {source.enabled ? "Disable" : "Enable"}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          {/* Services card with Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Services</CardTitle>
+              <CardDescription>
+                Curated allow/block toggles for common apps
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Service</TableHead>
+                    <TableHead>Risk</TableHead>
+                    <TableHead>Mode</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredServices.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={4}
+                        className="h-24 text-center text-muted-foreground"
+                      >
+                        No services configured.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredServices
+                      .slice(
+                        0,
+                        showServicesView ? filteredServices.length : 5,
+                      )
+                      .map((service) => (
+                        <TableRow key={service.manifest.service_id}>
+                          <TableCell className="font-medium">
+                            {service.manifest.display_name}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {service.manifest.risk_notes}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="secondary">{service.mode}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex gap-1">
+                              {(["Inherit", "Allow", "Block"] as const).map(
+                                (mode) => (
+                                  <Button
+                                    key={mode}
+                                    variant={
+                                      service.mode === mode
+                                        ? "default"
+                                        : "ghost"
+                                    }
+                                    size="sm"
+                                    onClick={() =>
+                                      void handleServiceUpdate(
+                                        service.manifest.service_id,
+                                        mode,
+                                      )
+                                    }
+                                    disabled={
+                                      busyAction ===
+                                      `service-${service.manifest.service_id}`
+                                    }
+                                  >
+                                    {mode}
+                                  </Button>
+                                ),
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                  )}
+                </TableBody>
+              </Table>
+              {!showServicesView && filteredServices.length > 5 ? (
+                <div className="mt-4 flex justify-end">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setShowServicesView(true)}
+                  >
+                    Show all services
+                  </Button>
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ---------------------------------------------------------------- */}
+        {/* Advanced tab                                                       */}
+        {/* ---------------------------------------------------------------- */}
+        <TabsContent value="advanced" className="space-y-6">
+          {/* Sync card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Sync and replication</CardTitle>
+              <CardDescription>
+                Control how this node synchronizes with peers
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3 text-sm">
                 <div>
-                  Profile:{" "}
-                  <span className="font-medium text-foreground">
-                    {syncStatus.profile}
-                  </span>
+                  <span className="text-muted-foreground">Profile: </span>
+                  <span className="font-medium">{syncStatus.profile}</span>
                 </div>
                 <div>
-                  Revision:{" "}
-                  <span className="font-medium text-foreground">
-                    {syncStatus.revision}
-                  </span>
+                  <span className="text-muted-foreground">Revision: </span>
+                  <span className="font-medium">{syncStatus.revision}</span>
                 </div>
                 <div>
-                  Peers:{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="text-muted-foreground">Peers: </span>
+                  <span className="font-medium">
                     {syncStatus.peers.length}
                   </span>
                 </div>
               </div>
-              <div className="mt-4 grid gap-3 xl:grid-cols-[1fr_auto]">
-                <select
-                  className="h-10 rounded-xl border border-input bg-background px-4 text-sm"
-                  value={syncProfileDraft}
-                  onChange={(event) =>
-                    setSyncProfileDraft(event.target.value)
-                  }
-                >
-                  <option value="full">Full replication</option>
-                  <option value="settings-only">Settings only</option>
-                  <option value="read-only-follower">
-                    Read-only follower
-                  </option>
-                </select>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void handleSyncProfileSave()}
-                  disabled={busyAction === "sync-profile-save"}
-                >
-                  Save profile
-                </Button>
+              <div className="grid gap-3 xl:grid-cols-[1fr_auto]">
+                <div className="space-y-2">
+                  <Label htmlFor="sync-profile">Sync profile</Label>
+                  <select
+                    id="sync-profile"
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={syncProfileDraft}
+                    onChange={(event) =>
+                      setSyncProfileDraft(event.target.value)
+                    }
+                  >
+                    <option value="full">Full replication</option>
+                    <option value="settings-only">Settings only</option>
+                    <option value="read-only-follower">
+                      Read-only follower
+                    </option>
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleSyncProfileSave()}
+                    disabled={busyAction === "sync-profile-save"}
+                  >
+                    Save profile
+                  </Button>
+                </div>
               </div>
-              <div className="mt-3 grid gap-3 xl:grid-cols-[180px_minmax(0,1fr)_auto]">
-                <select
-                  className="h-10 rounded-xl border border-input bg-background px-4 text-sm"
-                  value={syncTransportModeDraft}
-                  onChange={(event) =>
-                    setSyncTransportModeDraft(event.target.value)
-                  }
-                >
-                  <option value="opportunistic">Opportunistic</option>
-                  <option value="https-required">HTTPS required</option>
-                </select>
-                <Input
-                  value={syncTransportTokenDraft}
-                  onChange={(event) =>
-                    setSyncTransportTokenDraft(event.target.value)
-                  }
-                  placeholder={
-                    syncStatus.transport_token_configured
-                      ? "Set new token or leave blank to clear"
-                      : "Optional bearer token"
-                  }
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void handleSyncTransportSave()}
-                  disabled={busyAction === "sync-transport-save"}
-                >
-                  Save transport
-                </Button>
+              <div className="grid gap-3 xl:grid-cols-[180px_minmax(0,1fr)_auto]">
+                <div className="space-y-2">
+                  <Label htmlFor="transport-mode">Transport mode</Label>
+                  <select
+                    id="transport-mode"
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={syncTransportModeDraft}
+                    onChange={(event) =>
+                      setSyncTransportModeDraft(event.target.value)
+                    }
+                  >
+                    <option value="opportunistic">Opportunistic</option>
+                    <option value="https-required">HTTPS required</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="transport-token">Bearer token</Label>
+                  <Input
+                    id="transport-token"
+                    value={syncTransportTokenDraft}
+                    onChange={(event) =>
+                      setSyncTransportTokenDraft(event.target.value)
+                    }
+                    placeholder={
+                      syncStatus.transport_token_configured
+                        ? "Set new token or leave blank to clear"
+                        : "Optional bearer token"
+                    }
+                  />
+                </div>
+                <div className="flex items-end">
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleSyncTransportSave()}
+                    disabled={busyAction === "sync-transport-save"}
+                  >
+                    Save transport
+                  </Button>
+                </div>
               </div>
-            </div>
-            <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Tailscale</div>
-                <Badge>
+            </CardContent>
+          </Card>
+
+          {/* Tailscale card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Tailscale</CardTitle>
+              <CardDescription>
+                When enabled, Cogwheel advertises this machine as a Tailscale
+                exit node and keeps DNS on the local filter path for exit-node
+                traffic only.
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">
                   {tailscaleStatus.exit_node_active
                     ? "Exit node advertised"
                     : tailscaleStatus.installed
                       ? "Installed"
                       : "Not installed"}
                 </Badge>
-              </div>
-              <div className="mt-2 grid gap-2 text-muted-foreground">
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3 text-sm">
                 <div>
-                  Host:{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="text-muted-foreground">Host: </span>
+                  <span className="font-medium">
                     {tailscaleStatus.hostname ?? "-"}
                   </span>
                 </div>
                 <div>
-                  Tailnet:{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="text-muted-foreground">Tailnet: </span>
+                  <span className="font-medium">
                     {tailscaleStatus.tailnet_name ?? "-"}
                   </span>
                 </div>
                 <div>
-                  Peers:{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="text-muted-foreground">Peers: </span>
+                  <span className="font-medium">
                     {tailscaleStatus.peer_count}
                   </span>
                 </div>
               </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button
-                  variant={
-                    tailscaleStatus.exit_node_active ? "ghost" : "secondary"
-                  }
-                  size="sm"
-                  onClick={() => void handleTailscaleExitNodeToggle()}
-                  disabled={busyAction === "tailscale-exit-node"}
-                >
-                  {busyAction === "tailscale-exit-node"
-                    ? "Updating..."
-                    : tailscaleStatus.exit_node_active
-                      ? "Disable exit-node filtering"
-                      : "Enable exit-node filtering"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void handleTailscaleRollback()}
-                  disabled={busyAction === "tailscale-rollback"}
-                >
-                  {busyAction === "tailscale-rollback"
-                    ? "Rolling back..."
-                    : "Roll back"}
-                </Button>
-              </div>
               {tailscaleDnsCheck.suggestions.length > 0 ? (
-                <div className="mt-3 rounded-lg bg-primary/10 px-3 py-2 text-xs text-primary">
+                <p className="rounded-md bg-primary/10 px-3 py-2 text-sm text-primary">
                   {tailscaleDnsCheck.message}
-                </div>
+                </p>
               ) : null}
-              <div className="mt-3 text-xs text-muted-foreground">
-                When enabled, Cogwheel advertises this machine as a Tailscale
-                exit node and keeps DNS on the local filter path for exit-node
-                traffic only.
-              </div>
-            </div>
-          </div>
-        ) : null}
-        {settingsView === "advanced" ? (
-          <div className="mx-6 mb-6 rounded-2xl border border-border bg-muted/20 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="font-medium">Latency budgets</div>
-                <div className="text-sm text-muted-foreground">
-                  Tracks the DNS hot path against the documented p50 budgets for
-                  cache hits, cache misses, and classifier work.
-                </div>
-              </div>
-              <Badge>
-                {latencyBudget.within_budget
-                  ? "Within budget"
-                  : "Needs attention"}
-              </Badge>
-            </div>
-            <div className="mt-4 grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
-              <div className="rounded-2xl border border-border bg-background p-4 text-sm">
-                <div className="text-muted-foreground">
-                  Current cache hit rate
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-foreground">
-                  {(latencyBudget.cache_hit_rate * 100).toFixed(1)}%
-                </div>
-                <div className="mt-2 text-xs text-muted-foreground">
-                  Higher cache hit rates usually keep household traffic under
-                  the fastest path budget.
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                {latencyBudget.checks.map((check) => (
-                  <div
-                    key={check.label}
-                    className="rounded-2xl border border-border bg-background p-4 text-sm"
+            </CardContent>
+            <CardFooter className="gap-2">
+              <Button
+                variant={
+                  tailscaleStatus.exit_node_active ? "ghost" : "secondary"
+                }
+                onClick={() => void handleTailscaleExitNodeToggle()}
+                disabled={busyAction === "tailscale-exit-node"}
+              >
+                {busyAction === "tailscale-exit-node"
+                  ? "Updating..."
+                  : tailscaleStatus.exit_node_active
+                    ? "Disable exit-node filtering"
+                    : "Enable exit-node filtering"}
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => void handleTailscaleRollback()}
+                disabled={busyAction === "tailscale-rollback"}
+              >
+                {busyAction === "tailscale-rollback"
+                  ? "Rolling back..."
+                  : "Roll back"}
+              </Button>
+            </CardFooter>
+          </Card>
+
+          {/* Classifier card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Classifier</CardTitle>
+              <CardDescription>
+                Persisted directly in the backend control plane
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">{settings.classifier.mode}</Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {(["Off", "Monitor", "Protect"] as const).map((mode) => (
+                  <Button
+                    key={mode}
+                    variant={
+                      settings.classifier.mode === mode
+                        ? "default"
+                        : "secondary"
+                    }
+                    size="sm"
+                    onClick={() => void handleClassifierUpdate(mode)}
+                    disabled={busyAction === `classifier-mode-${mode}`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium text-foreground">
-                        {check.label}
-                      </div>
-                      <Badge>{check.status}</Badge>
-                    </div>
-                    <div className="mt-3 text-lg font-semibold text-foreground">
-                      {check.observed_ms.toFixed(3)} ms
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Target p50 {check.target_p50_ms.toFixed(1)} ms
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Samples: {check.sample_count}
-                    </div>
-                  </div>
+                    {mode}
+                  </Button>
                 ))}
               </div>
-            </div>
-            {latencyBudget.recommendations.length > 0 ? (
-              <div className="mt-4 rounded-2xl border border-dashed border-border/70 bg-background/80 p-4 text-sm text-muted-foreground">
-                {latencyBudget.recommendations.join(" ")}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </Card>
-
-      <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-        <Card id="settings-page-core" className="overflow-hidden p-0">
-          <div className="border-b border-border px-6 py-5">
-            <CardTitle>Policy and notifications</CardTitle>
-            <CardDescription className="mt-1">
-              {settingsView === "advanced"
-                ? "Core controls for alerts, classifier behavior, and optional intelligence features."
-                : "Simple household controls for alerts and the few behaviors you are likely to change often."}
-            </CardDescription>
-          </div>
-          <div className="space-y-5 px-6 py-6">
-            {settingsView === "advanced" ? (
-              <>
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="font-medium">Classifier mode</div>
-                      <div className="text-sm text-muted-foreground">
-                        Persisted directly in the backend control plane.
-                      </div>
-                    </div>
-                    <Badge>{settings.classifier.mode}</Badge>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {(["Off", "Monitor", "Protect"] as const).map((mode) => (
-                      <Button
-                        key={mode}
-                        variant={
-                          settings.classifier.mode === mode
-                            ? "primary"
-                            : "secondary"
-                        }
-                        size="sm"
-                        onClick={() => void handleClassifierUpdate(mode)}
-                        disabled={busyAction === `classifier-mode-${mode}`}
-                      >
-                        {mode}
-                      </Button>
-                    ))}
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                    <Input
-                      value={classifierThreshold}
-                      onChange={(event) =>
-                        setClassifierThreshold(event.target.value)
-                      }
-                      placeholder="0.92"
-                    />
-                    <Button
-                      variant="secondary"
-                      onClick={() => void handleClassifierThresholdSave()}
-                      disabled={busyAction === "classifier-threshold"}
-                    >
-                      Save threshold
-                    </Button>
-                  </div>
-                </section>
-
-                <Separator />
-              </>
-            ) : null}
-
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">Alert delivery</div>
-                  <div className="text-sm text-muted-foreground">
-                    Send high-severity security alerts to an external webhook.
-                  </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <div className="space-y-2">
+                  <Label htmlFor="classifier-threshold">Threshold</Label>
+                  <Input
+                    id="classifier-threshold"
+                    value={classifierThreshold}
+                    onChange={(event) =>
+                      setClassifierThreshold(event.target.value)
+                    }
+                    placeholder="0.92"
+                  />
                 </div>
-                <Badge>
-                  {notificationEnabled
-                    ? `Webhook ${notificationMinSeverity}+`
-                    : "Disabled"}
-                </Badge>
-              </div>
-              <label className="flex items-center gap-3 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm">
-                <input
-                  type="checkbox"
-                  checked={notificationEnabled}
-                  onChange={(event) =>
-                    setNotificationEnabled(event.target.checked)
-                  }
-                />
-                Enable outbound alert notifications
-              </label>
-              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_170px_auto]">
-                <Input
-                  value={notificationWebhookUrl}
-                  onChange={(event) =>
-                    setNotificationWebhookUrl(event.target.value)
-                  }
-                  placeholder="https://hooks.example.com/cogwheel"
-                />
-                <select
-                  className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-                  value={notificationMinSeverity}
-                  onChange={(event) =>
-                    setNotificationMinSeverity(
-                      event.target.value as "medium" | "high" | "critical",
-                    )
-                  }
-                >
-                  <option value="medium">Medium+</option>
-                  <option value="high">High+</option>
-                  <option value="critical">Critical only</option>
-                </select>
-                <div className="flex gap-2">
+                <div className="flex items-end">
                   <Button
                     variant="secondary"
-                    onClick={() => void handleNotificationSave()}
-                    disabled={busyAction === "notifications-save"}
+                    onClick={() => void handleClassifierThresholdSave()}
+                    disabled={busyAction === "classifier-threshold"}
                   >
-                    Save alerts
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    onClick={() => void handleNotificationTest()}
-                    disabled={
-                      busyAction === "notifications-test" ||
-                      !notificationWebhookUrl
-                    }
-                  >
-                    Send test
+                    Save threshold
                   </Button>
                 </div>
               </div>
-            </section>
+            </CardContent>
+          </Card>
 
-            {settingsView === "advanced" ? <Separator /> : null}
-
-            {settingsView === "advanced" ? (
-              <>
-                <section className="space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium">
-                        Optional intelligence feeds
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        Keep enrichment providers off the DNS hot path and
-                        enable them only when needed.
-                      </div>
-                    </div>
-                    <Badge>
-                      {
-                        threatIntelSettings.providers.filter(
-                          (provider) => provider.enabled,
-                        ).length
-                      }{" "}
-                      enabled
-                    </Badge>
-                  </div>
-                  <div className="grid gap-3">
-                    {threatIntelSettings.providers.map((provider) => (
-                      <ListRow
-                        key={provider.id}
-                        tone="muted"
-                        title={provider.display_name}
-                        detail={provider.capabilities.join(" \u2022 ")}
-                        right={
+          {/* Threat intel card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Threat intelligence feeds</CardTitle>
+              <CardDescription>
+                Keep enrichment providers off the DNS hot path and enable them
+                only when needed
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">
+                  {
+                    threatIntelSettings.providers.filter(
+                      (provider) => provider.enabled,
+                    ).length
+                  }{" "}
+                  enabled
+                </Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Provider</TableHead>
+                    <TableHead>Capabilities</TableHead>
+                    <TableHead>Feed URL</TableHead>
+                    <TableHead>Interval</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {threatIntelSettings.providers.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={6}
+                        className="h-24 text-center text-muted-foreground"
+                      >
+                        No threat intelligence providers configured.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    threatIntelSettings.providers.map((provider) => (
+                      <TableRow key={provider.id}>
+                        <TableCell className="font-medium">
+                          {provider.display_name}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {provider.capabilities.join(" \u2022 ")}
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            className="h-8 text-xs"
+                            value={provider.feed_url ?? ""}
+                            onChange={(event) =>
+                              setThreatIntelSettings((current) => ({
+                                ...current,
+                                providers: current.providers.map((item) =>
+                                  item.id === provider.id
+                                    ? {
+                                        ...item,
+                                        feed_url:
+                                          event.target.value || null,
+                                      }
+                                    : item,
+                                ),
+                              }))
+                            }
+                            placeholder="https://feed.example.invalid/dns"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            className="h-8 w-20 text-xs"
+                            value={String(
+                              provider.update_interval_minutes,
+                            )}
+                            onChange={(event) => {
+                              const nextValue = Number.parseInt(
+                                event.target.value,
+                                10,
+                              );
+                              setThreatIntelSettings((current) => ({
+                                ...current,
+                                providers: current.providers.map((item) =>
+                                  item.id === provider.id
+                                    ? {
+                                        ...item,
+                                        update_interval_minutes:
+                                          Number.isNaN(nextValue)
+                                            ? item.update_interval_minutes
+                                            : nextValue,
+                                      }
+                                    : item,
+                                ),
+                              }));
+                            }}
+                            placeholder="60"
+                          />
+                        </TableCell>
+                        <TableCell>
                           <Badge
-                            className={
-                              provider.enabled
-                                ? "bg-primary/10 text-primary"
-                                : "bg-muted text-muted-foreground"
+                            variant={
+                              provider.enabled ? "default" : "secondary"
                             }
                           >
                             {provider.enabled ? "Enabled" : "Disabled"}
                           </Badge>
-                        }
-                        footer={
-                          <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
-                            <Input
-                              value={provider.feed_url ?? ""}
-                              onChange={(event) =>
-                                setThreatIntelSettings((current) => ({
-                                  ...current,
-                                  providers: current.providers.map((item) =>
-                                    item.id === provider.id
-                                      ? {
-                                          ...item,
-                                          feed_url:
-                                            event.target.value || null,
-                                        }
-                                      : item,
-                                  ),
-                                }))
-                              }
-                              placeholder="https://feed.example.invalid/dns"
-                            />
-                            <Input
-                              value={String(
-                                provider.update_interval_minutes,
-                              )}
-                              onChange={(event) => {
-                                const nextValue = Number.parseInt(
-                                  event.target.value,
-                                  10,
-                                );
-                                setThreatIntelSettings((current) => ({
-                                  ...current,
-                                  providers: current.providers.map((item) =>
-                                    item.id === provider.id
-                                      ? {
-                                          ...item,
-                                          update_interval_minutes:
-                                            Number.isNaN(nextValue)
-                                              ? item.update_interval_minutes
-                                              : nextValue,
-                                        }
-                                      : item,
-                                  ),
-                                }));
-                              }}
-                              placeholder="60"
-                            />
-                            <div className="flex justify-end">
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() =>
-                                  void handleThreatIntelProviderSave(
-                                    provider.id,
-                                  )
-                                }
-                                disabled={
-                                  busyAction ===
-                                  `threat-intel-${provider.id}`
-                                }
-                              >
-                                {busyAction ===
-                                `threat-intel-${provider.id}`
-                                  ? "Saving..."
-                                  : "Save"}
-                              </Button>
-                            </div>
-                          </div>
-                        }
-                      />
-                    ))}
-                  </div>
-                </section>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() =>
+                              void handleThreatIntelProviderSave(
+                                provider.id,
+                              )
+                            }
+                            disabled={
+                              busyAction ===
+                              `threat-intel-${provider.id}`
+                            }
+                          >
+                            {busyAction ===
+                            `threat-intel-${provider.id}`
+                              ? "Saving..."
+                              : "Save"}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
 
-                <Separator />
-              </>
-            ) : null}
-
-            {settingsView === "advanced" ? (
-              <section className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-medium">Federated learning</div>
-                    <div className="text-sm text-muted-foreground">
-                      Share model updates only. Raw logs stay local.
-                    </div>
-                  </div>
-                  <Badge>
-                    {federatedLearningSettings.enabled
-                      ? federatedLearningSettings.privacy_mode
-                      : "Disabled"}
-                  </Badge>
-                </div>
-                <label className="flex items-center gap-3 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={federatedLearningSettings.enabled}
-                    onChange={(event) =>
-                      setFederatedLearningSettings((current) => ({
-                        ...current,
-                        enabled: event.target.checked,
-                      }))
-                    }
-                  />
+          {/* Federated learning card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Federated learning</CardTitle>
+              <CardDescription>
+                Share model updates only. Raw logs stay local.
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">
+                  {federatedLearningSettings.enabled
+                    ? federatedLearningSettings.privacy_mode
+                    : "Disabled"}
+                </Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="federated-enabled"
+                  checked={federatedLearningSettings.enabled}
+                  onCheckedChange={(checked) =>
+                    setFederatedLearningSettings((current) => ({
+                      ...current,
+                      enabled: checked,
+                    }))
+                  }
+                />
+                <Label htmlFor="federated-enabled">
                   Enable federated learning coordinator sync
-                </label>
-                <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
+                </Label>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
+                <div className="space-y-2">
+                  <Label htmlFor="coordinator-url">Coordinator URL</Label>
                   <Input
+                    id="coordinator-url"
                     value={federatedLearningSettings.coordinator_url ?? ""}
                     onChange={(event) =>
                       setFederatedLearningSettings((current) => ({
@@ -1121,7 +1356,11 @@ export default function SettingsPage() {
                     }
                     placeholder="https://coordinator.example.invalid"
                   />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="round-interval">Round interval (h)</Label>
                   <Input
+                    id="round-interval"
                     value={String(
                       federatedLearningSettings.round_interval_hours,
                     )}
@@ -1139,318 +1378,224 @@ export default function SettingsPage() {
                     }}
                     placeholder="24"
                   />
-                  <Button
-                    variant="secondary"
-                    onClick={() => void handleFederatedLearningSave()}
-                    disabled={busyAction === "federated-learning-save"}
-                  >
-                    {busyAction === "federated-learning-save"
-                      ? "Saving..."
-                      : "Save"}
-                  </Button>
-                </div>
-              </section>
-            ) : null}
-          </div>
-        </Card>
-
-        <div className="grid gap-6">
-          <Card id="settings-page-blocklists" className="overflow-hidden p-0">
-            <div className="border-b border-border px-6 py-5">
-              <CardTitle>Sources and services</CardTitle>
-              <CardDescription className="mt-1">
-                {settingsView === "advanced"
-                  ? "Manage imported blocklists and common-service toggles without crowding the overview."
-                  : "The core household settings live here: list sources, profile sources, and a few service toggles."}
-              </CardDescription>
-            </div>
-            <div className="grid gap-4 px-6 py-6">
-              <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                <div className="font-medium">Add blocklist</div>
-                <div className="mt-3 grid gap-3">
-                  <Input
-                    value={blocklistName}
-                    onChange={(event) =>
-                      setBlocklistName(event.target.value)
-                    }
-                    placeholder="Human-readable name"
-                  />
-                  <Input
-                    value={blocklistUrl}
-                    onChange={(event) =>
-                      setBlocklistUrl(event.target.value)
-                    }
-                    placeholder="Source URL or data: URL"
-                  />
-                  <div className="grid gap-3 xl:grid-cols-3">
-                    <select
-                      className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-                      value={blocklistProfile}
-                      onChange={(event) =>
-                        setBlocklistProfile(event.target.value)
-                      }
-                    >
-                      <option value="custom">Custom</option>
-                      <option value="essential">Essential</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="aggressive">Aggressive</option>
-                    </select>
-                    <select
-                      className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
-                      value={blocklistStrictness}
-                      onChange={(event) =>
-                        setBlocklistStrictness(
-                          event.target.value as
-                            | "strict"
-                            | "balanced"
-                            | "relaxed",
-                        )
-                      }
-                    >
-                      <option value="strict">Strict</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="relaxed">Relaxed</option>
-                    </select>
-                    <Input
-                      value={blocklistInterval}
-                      onChange={(event) =>
-                        setBlocklistInterval(event.target.value)
-                      }
-                      placeholder="Refresh minutes"
-                    />
-                  </div>
-                  <div className="flex justify-end">
-                    <Button
-                      onClick={() => void handleBlocklistCreate()}
-                      disabled={
-                        !blocklistName ||
-                        !blocklistUrl ||
-                        busyAction === "create-blocklist"
-                      }
-                    >
-                      Add blocklist
-                    </Button>
-                  </div>
                 </div>
               </div>
-              {settings.blocklists.map((source) => (
-                <ListRow
-                  key={source.id}
-                  title={source.name}
-                  detail={`${source.profile} \u2022 ${source.refresh_interval_minutes}m`}
-                  right={
+            </CardContent>
+            <CardFooter className="justify-end">
+              <Button
+                onClick={() => void handleFederatedLearningSave()}
+                disabled={busyAction === "federated-learning-save"}
+              >
+                {busyAction === "federated-learning-save"
+                  ? "Saving..."
+                  : "Save"}
+              </Button>
+            </CardFooter>
+          </Card>
+
+          {/* Latency budgets card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Latency budgets</CardTitle>
+              <CardDescription>
+                Tracks the DNS hot path against the documented p50 budgets for
+                cache hits, cache misses, and classifier work
+              </CardDescription>
+              <CardAction>
+                <Badge variant="secondary">
+                  {latencyBudget.within_budget
+                    ? "Within budget"
+                    : "Needs attention"}
+                </Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-sm">
+                <span className="text-muted-foreground">
+                  Current cache hit rate:{" "}
+                </span>
+                <span className="text-2xl font-semibold">
+                  {(latencyBudget.cache_hit_rate * 100).toFixed(1)}%
+                </span>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Path</TableHead>
+                    <TableHead>Target p50</TableHead>
+                    <TableHead>Observed</TableHead>
+                    <TableHead>Samples</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {latencyBudget.checks.map((check) => (
+                    <TableRow key={check.label}>
+                      <TableCell className="font-medium">
+                        {check.label}
+                      </TableCell>
+                      <TableCell>
+                        {check.target_p50_ms.toFixed(1)} ms
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">
+                        {check.observed_ms.toFixed(3)} ms
+                      </TableCell>
+                      <TableCell>{check.sample_count}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            check.status === "ok" ? "secondary" : "default"
+                          }
+                        >
+                          {check.status}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {latencyBudget.recommendations.length > 0 ? (
+                <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
+                  {latencyBudget.recommendations.join(" ")}
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          {/* Audit trail card with Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Audit trail</CardTitle>
+              <CardDescription>
+                Recent control-plane events for operator review
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Recovery actions */}
+              <div className="space-y-3">
+                <h4 className="text-sm font-medium">Guided recovery</h4>
+                {recoveryActions.map((item) => (
+                  <div
+                    key={item.title}
+                    className="flex items-start justify-between gap-4 rounded-lg border border-border p-4"
+                  >
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">{item.title}</div>
+                      <p className="text-sm text-muted-foreground">
+                        {item.detail}
+                      </p>
+                    </div>
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() =>
-                        void handleBlocklistToggle(
-                          source.id,
-                          !source.enabled,
-                        )
-                      }
-                      disabled={
-                        busyAction === `blocklist-toggle-${source.id}`
-                      }
+                      className="shrink-0"
+                      onClick={() => {
+                        if (item.actionKey === "runtime-health-check") {
+                          void handleRuntimeHealthCheck();
+                          return;
+                        }
+                        if (item.actionKey === "notifications") {
+                          setAuditEventFilter("notifications");
+                          return;
+                        }
+                        if (item.actionKey === "rollback-ruleset") {
+                          void handleRollbackRuleset();
+                          return;
+                        }
+                        void handleRefreshSources();
+                      }}
+                      disabled={item.disabled}
                     >
-                      {source.enabled ? "Disable" : "Enable"}
+                      {item.actionLabel}
                     </Button>
-                  }
-                />
-              ))}
-              <Card
-                id="services"
-                className="border border-border bg-muted/20 p-5 shadow-none"
-              >
-                <CardTitle>Services</CardTitle>
-                <CardDescription className="mt-1">
-                  Optional curated allow/block toggles for common apps.
-                </CardDescription>
-                <div className="mt-4 grid gap-3">
-                  {filteredServices
-                    .slice(
-                      0,
-                      showServicesView
-                        ? filteredServices.length
-                        : 3,
-                    )
-                    .map((service) => (
-                      <ListRow
-                        key={service.manifest.service_id}
-                        title={service.manifest.display_name}
-                        detail={service.manifest.risk_notes}
-                        right={<Badge>{service.mode}</Badge>}
-                        footer={
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {(
-                              ["Inherit", "Allow", "Block"] as const
-                            ).map((mode) => (
-                              <Button
-                                key={mode}
-                                variant={
-                                  service.mode === mode
-                                    ? "primary"
-                                    : "secondary"
-                                }
-                                size="sm"
-                                onClick={() =>
-                                  void handleServiceUpdate(
-                                    service.manifest.service_id,
-                                    mode,
-                                  )
-                                }
-                                disabled={
-                                  busyAction ===
-                                  `service-${service.manifest.service_id}`
-                                }
-                              >
-                                {mode}
-                              </Button>
-                            ))}
-                          </div>
-                        }
-                      />
-                    ))}
-                  {!showServicesView ? (
-                    <div className="flex justify-end">
-                      <Button
-                        variant="ghost"
-                        onClick={() => setShowServicesView(true)}
-                      >
-                        Show all services
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
-              </Card>
-            </div>
-          </Card>
-
-          {settingsView === "advanced" ? (
-            <Card className="overflow-hidden p-0">
-              <div className="border-b border-border px-6 py-5">
-                <CardTitle>Recovery and operator feed</CardTitle>
-                <CardDescription className="mt-1">
-                  Use guided recovery, audit history, and runtime notes without
-                  cluttering the household overview.
-                </CardDescription>
+                  </div>
+                ))}
               </div>
-              <div className="space-y-5 px-6 py-6">
-                <section className="space-y-3">
-                  <div className="font-medium">Guided recovery</div>
-                  <div className="grid gap-3">
-                    {recoveryActions.map((item) => (
-                      <ListRow
-                        key={item.title}
-                        tone="muted"
-                        title={item.title}
-                        detail={item.detail}
-                        footer={
-                          <div className="mt-3">
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              onClick={() => {
-                                if (
-                                  item.actionKey ===
-                                  "runtime-health-check"
-                                ) {
-                                  void handleRuntimeHealthCheck();
-                                  return;
-                                }
-                                if (
-                                  item.actionKey === "notifications"
-                                ) {
-                                  setAuditEventFilter("notifications");
-                                  return;
-                                }
-                                if (
-                                  item.actionKey === "rollback-ruleset"
-                                ) {
-                                  void handleRollbackRuleset();
-                                  return;
-                                }
-                                void handleRefreshSources();
-                              }}
-                              disabled={item.disabled}
-                            >
-                              {item.actionLabel}
-                            </Button>
-                          </div>
-                        }
-                      />
-                    ))}
-                  </div>
-                </section>
-                <Separator />
-                <section className="space-y-3">
-                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                    <div>
-                      <div className="font-medium">Recent audit events</div>
-                      <div className="text-sm text-muted-foreground">
-                        Filter the operator feed to focus on the control-plane
-                        changes you are investigating.
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {(
-                        [
-                          ["all", "All events"],
-                          ["runtime", "Runtime"],
-                          ["notifications", "Notifications"],
-                          ["devices", "Devices"],
-                          ["rulesets", "Rulesets"],
-                        ] as const
-                      ).map(([value, label]) => (
-                        <Button
-                          key={value}
-                          variant={
-                            auditEventFilter === value
-                              ? "primary"
-                              : "ghost"
-                          }
-                          size="sm"
-                          onClick={() =>
-                            setAuditEventFilter(
-                              value as
-                                | "all"
-                                | "runtime"
-                                | "notifications"
-                                | "devices"
-                                | "rulesets",
-                            )
-                          }
-                        >
-                          {label}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="grid gap-3">
-                    {filteredAuditEvents.slice(0, 8).map((event) => {
+
+              <Separator />
+
+              {/* Audit event filters */}
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    ["all", "All events"],
+                    ["runtime", "Runtime"],
+                    ["notifications", "Notifications"],
+                    ["devices", "Devices"],
+                    ["rulesets", "Rulesets"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    variant={
+                      auditEventFilter === value ? "default" : "ghost"
+                    }
+                    size="sm"
+                    onClick={() =>
+                      setAuditEventFilter(
+                        value as
+                          | "all"
+                          | "runtime"
+                          | "notifications"
+                          | "devices"
+                          | "rulesets",
+                      )
+                    }
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Event</TableHead>
+                    <TableHead>Detail</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Category</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredAuditEvents.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={4}
+                        className="h-24 text-center text-muted-foreground"
+                      >
+                        No audit events match the current filter.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredAuditEvents.slice(0, 8).map((event) => {
                       const summary = summarizeAuditEvent(event);
                       return (
-                        <ListRow
-                          key={event.id}
-                          tone="muted"
-                          title={summary.title}
-                          detail={summary.detail}
-                          meta={
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {event.event_type}
-                            </div>
-                          }
-                          right={<Badge>{summary.category}</Badge>}
-                        />
+                        <TableRow key={event.id}>
+                          <TableCell className="font-medium">
+                            {summary.title}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {summary.detail}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {event.event_type}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {summary.category}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
                       );
-                    })}
-                  </div>
-                </section>
-              </div>
-            </Card>
-          ) : null}
-        </div>
-      </section>
-    </section>
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }
 
