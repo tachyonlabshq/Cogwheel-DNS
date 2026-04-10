@@ -14,6 +14,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -304,58 +311,60 @@ export function DevicesTab() {
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="device-policy">Policy mode</Label>
-                <select
-                  id="device-policy"
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                <Select
                   value={devicePolicyMode}
-                  onChange={(event) =>
-                    setDevicePolicyMode(
-                      event.target.value as "global" | "custom",
-                    )
+                  onValueChange={(value) =>
+                    setDevicePolicyMode(value as "global" | "custom")
                   }
                 >
-                  <option value="global">Household default</option>
-                  <option value="custom">Custom assignment</option>
-                </select>
+                  <SelectTrigger id="device-policy">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="global">Household default</SelectItem>
+                    <SelectItem value="custom">Custom assignment</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="device-profile">Profile override</Label>
-                <select
-                  id="device-profile"
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                <Select
                   value={deviceProfileOverride}
-                  onChange={(event) =>
-                    setDeviceProfileOverride(event.target.value)
-                  }
+                  onValueChange={setDeviceProfileOverride}
                   disabled={devicePolicyMode !== "custom"}
                 >
-                  <option value="">Choose a saved profile</option>
-                  {settings.block_profiles.map((profile) => (
-                    <option key={profile.id} value={profile.name}>
-                      {profile.emoji} {profile.name}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger id="device-profile">
+                    <SelectValue placeholder="Choose a saved profile" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {settings.block_profiles.map((profile) => (
+                      <SelectItem key={profile.id} value={profile.name}>
+                        {profile.emoji} {profile.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="device-protection">Protection</Label>
-                <select
-                  id="device-protection"
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                <Select
                   value={deviceProtectionOverride}
-                  onChange={(event) =>
-                    setDeviceProtectionOverride(
-                      event.target.value as "inherit" | "bypass",
-                    )
+                  onValueChange={(value) =>
+                    setDeviceProtectionOverride(value as "inherit" | "bypass")
                   }
                   disabled={devicePolicyMode !== "custom"}
                 >
-                  <option value="inherit">Keep blocking on</option>
-                  <option value="bypass">Bypass blocking</option>
-                </select>
+                  <SelectTrigger id="device-protection">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">Keep blocking on</SelectItem>
+                    <SelectItem value="bypass">Bypass blocking</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="device-allowed">Allowed domains</Label>
@@ -381,37 +390,40 @@ export function DevicesTab() {
                 </p>
               </div>
               <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                <Select
                   value={deviceServiceOverrideId}
-                  onChange={(event) =>
-                    setDeviceServiceOverrideId(event.target.value)
-                  }
+                  onValueChange={setDeviceServiceOverrideId}
                   disabled={devicePolicyMode !== "custom"}
                 >
-                  <option value="">Select service override</option>
-                  {settings.services.map((service) => (
-                    <option
-                      key={service.manifest.service_id}
-                      value={service.manifest.service_id}
-                    >
-                      {service.manifest.display_name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select service override" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {settings.services.map((service) => (
+                      <SelectItem
+                        key={service.manifest.service_id}
+                        value={service.manifest.service_id}
+                      >
+                        {service.manifest.display_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
                   value={deviceServiceOverrideMode}
-                  onChange={(event) =>
-                    setDeviceServiceOverrideMode(
-                      event.target.value as "allow" | "block",
-                    )
+                  onValueChange={(value) =>
+                    setDeviceServiceOverrideMode(value as "allow" | "block")
                   }
                   disabled={devicePolicyMode !== "custom"}
                 >
-                  <option value="allow">Allow service</option>
-                  <option value="block">Block service</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="allow">Allow service</SelectItem>
+                    <SelectItem value="block">Block service</SelectItem>
+                  </SelectContent>
+                </Select>
                 <Button
                   variant="outline"
                   onClick={addDeviceServiceOverride}

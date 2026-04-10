@@ -17,7 +17,6 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarTrigger,
   useSidebar,
@@ -41,8 +40,6 @@ export function AppSidebar() {
     document.documentElement.classList.contains("dark"),
   );
 
-  // activeTab is read from the dashboard's centered tabs visually,
-  // but the sidebar highlights based on a simple local tracking
   const [activeTab, setActiveTab] = useState("overview");
 
   // Listen for tab changes from the dashboard via a custom event
@@ -90,40 +87,47 @@ export function AppSidebar() {
         : "bg-destructive";
 
   return (
-    <Sidebar variant="inset" collapsible="icon">
-      <SidebarHeader>
-        <div className="flex items-center gap-3 px-2 py-1">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-lg">
+    <Sidebar className="border-r border-sidebar-border">
+      <SidebarHeader className="p-4">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gold/10">
             <img
               src="/cogwheel.png"
               alt=""
-              className="size-6 rounded"
+              className="h-4.5 w-4.5 rounded"
               onError={(e) => {
-                (e.target as HTMLImageElement).style.display = "none";
-                (e.target as HTMLImageElement).parentElement!.textContent =
-                  "\u2699\uFE0F";
+                const img = e.target as HTMLImageElement;
+                img.style.display = "none";
+                img.parentElement!.innerHTML =
+                  '<svg viewBox="0 0 24 24" class="h-4.5 w-4.5 text-gold" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="3" x2="12" y2="8"/><line x1="12" y1="16" x2="12" y2="21"/><line x1="3" y1="12" x2="8" y2="12"/><line x1="16" y1="12" x2="21" y2="12"/></svg>';
               }}
             />
           </div>
-          {!collapsed && (
-            <span className="font-display text-lg">Cogwheel</span>
-          )}
+          <h1 className="font-heading text-xl font-normal tracking-tight">
+            Cogwheel
+          </h1>
         </div>
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel className="text-[10px] uppercase tracking-widest text-muted-foreground/60">
-            Navigation
-          </SidebarGroupLabel>
+          {/* Navigation header */}
+          <div className="flex items-center justify-between px-4 py-1">
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60 font-medium">
+              Navigation
+            </span>
+          </div>
+
           <SidebarGroupContent>
-            <div className="space-y-0.5 px-1">
+            <div className="px-2">
               {navItems.map((item) => {
                 const isActive = activeTab === item.key;
                 return (
                   <button
                     key={item.key}
                     type="button"
+                    aria-label={item.label}
+                    aria-pressed={isActive}
                     onClick={() => {
                       setActiveTab(item.key);
                       window.dispatchEvent(
@@ -132,14 +136,28 @@ export function AppSidebar() {
                         }),
                       );
                     }}
-                    className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors ${
+                    className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors mb-0.5 ${
                       isActive
-                        ? "bg-secondary/70 text-foreground"
-                        : "text-muted-foreground hover:bg-secondary/30 hover:text-foreground"
+                        ? "bg-secondary/70"
+                        : "hover:bg-secondary/30"
                     }`}
                   >
-                    <item.icon className="size-4 shrink-0" />
-                    {!collapsed && <span>{item.label}</span>}
+                    <item.icon
+                      className={`h-4 w-4 shrink-0 ${
+                        isActive
+                          ? "text-foreground"
+                          : "text-muted-foreground/60"
+                      }`}
+                    />
+                    <span
+                      className={`text-sm ${
+                        isActive
+                          ? "text-foreground font-medium"
+                          : "text-foreground/80"
+                      }`}
+                    >
+                      {item.label}
+                    </span>
                   </button>
                 );
               })}
@@ -152,35 +170,29 @@ export function AppSidebar() {
         {/* Protection status */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
           <Shield className="h-3 w-3 shrink-0 text-muted-foreground/40" />
-          {!collapsed && (
-            <span className="flex items-center gap-1.5">
-              <span
-                className={`inline-block h-1.5 w-1.5 rounded-full ${protectionDot}`}
-              />
-              {protectionLabel}
-            </span>
-          )}
+          <span className="flex items-center gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${protectionDot}`}
+            />
+            {protectionLabel}
+          </span>
         </div>
 
         {/* Query count */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
           <Activity className="h-3 w-3 shrink-0 text-muted-foreground/40" />
-          {!collapsed && (
-            <span className="tabular-nums">
-              {dashboard.runtime_health.snapshot.queries_total.toLocaleString()}{" "}
-              queries
-            </span>
-          )}
+          <span className="tabular-nums">
+            {dashboard.runtime_health.snapshot.queries_total.toLocaleString()}{" "}
+            queries
+          </span>
         </div>
 
         {/* Blocklist count */}
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
           <HardDrive className="h-3 w-3 shrink-0 text-muted-foreground/40" />
-          {!collapsed && (
-            <span className="tabular-nums">
-              {dashboard.enabled_source_count.toLocaleString()} blocklists
-            </span>
-          )}
+          <span className="tabular-nums">
+            {dashboard.enabled_source_count.toLocaleString()} blocklists
+          </span>
         </div>
 
         {/* Dark mode toggle + collapse trigger */}

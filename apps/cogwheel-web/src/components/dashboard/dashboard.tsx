@@ -1,7 +1,14 @@
 import { useState, useEffect } from "react";
 import { RotateCw, Pause, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
+} from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 import { OverviewTab } from "./overview-tab";
@@ -43,6 +50,7 @@ export function Dashboard() {
   }, []);
 
   const {
+    state,
     refreshLiveData,
     dashboard,
     busyAction,
@@ -126,13 +134,49 @@ export function Dashboard() {
 
       {/* Tab content */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-        <div key={activeTab} className="animate-fade-in">
-          {activeTab === "overview" && <OverviewTab />}
-          {activeTab === "profiles" && <ProfilesTab />}
-          {activeTab === "devices" && <DevicesTab />}
-          {activeTab === "grease-ai" && <GreaseAiTab />}
-          {activeTab === "settings" && <SettingsTab />}
-        </div>
+        {state === "loading" ? (
+          <div className="p-4 md:p-6 space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {[1, 2, 3, 4].map((i) => (
+                <Card key={i}>
+                  <CardHeader>
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-8 w-16 mt-2" />
+                  </CardHeader>
+                  <CardFooter className="flex-col items-start gap-2">
+                    <Skeleton className="h-3 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                  </CardFooter>
+                </Card>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              {[1, 2].map((i) => (
+                <Card key={i}>
+                  <CardHeader>
+                    <Skeleton className="h-5 w-40" />
+                    <Skeleton className="h-3 w-56 mt-1" />
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-3">
+                      {[1, 2, 3].map((j) => (
+                        <Skeleton key={j} className="h-4 w-full" />
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div key={activeTab} className="animate-fade-in">
+            {activeTab === "overview" && <OverviewTab />}
+            {activeTab === "profiles" && <ProfilesTab />}
+            {activeTab === "devices" && <DevicesTab />}
+            {activeTab === "grease-ai" && <GreaseAiTab />}
+            {activeTab === "settings" && <SettingsTab />}
+          </div>
+        )}
       </ScrollArea>
     </div>
   );

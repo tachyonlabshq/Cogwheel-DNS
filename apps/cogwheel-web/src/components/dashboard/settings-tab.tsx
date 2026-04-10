@@ -19,6 +19,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -656,20 +663,23 @@ export function SettingsTab() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="min-severity">Min severity</Label>
-                  <select
-                    id="min-severity"
-                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  <Select
                     value={notificationMinSeverity}
-                    onChange={(event) =>
+                    onValueChange={(value) =>
                       setNotificationMinSeverity(
-                        event.target.value as "medium" | "high" | "critical",
+                        value as "medium" | "high" | "critical",
                       )
                     }
                   >
-                    <option value="medium">Medium+</option>
-                    <option value="high">High+</option>
-                    <option value="critical">Critical only</option>
-                  </select>
+                    <SelectTrigger id="min-severity">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="medium">Medium+</SelectItem>
+                      <SelectItem value="high">High+</SelectItem>
+                      <SelectItem value="critical">Critical only</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </CardContent>
@@ -731,39 +741,40 @@ export function SettingsTab() {
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="space-y-2">
                     <Label htmlFor="bl-profile">Profile</Label>
-                    <select
-                      id="bl-profile"
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    <Select
                       value={blocklistProfile}
-                      onChange={(event) =>
-                        setBlocklistProfile(event.target.value)
-                      }
+                      onValueChange={setBlocklistProfile}
                     >
-                      <option value="custom">Custom</option>
-                      <option value="essential">Essential</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="aggressive">Aggressive</option>
-                    </select>
+                      <SelectTrigger id="bl-profile">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="custom">Custom</SelectItem>
+                        <SelectItem value="essential">Essential</SelectItem>
+                        <SelectItem value="balanced">Balanced</SelectItem>
+                        <SelectItem value="aggressive">Aggressive</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="bl-strictness">Strictness</Label>
-                    <select
-                      id="bl-strictness"
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    <Select
                       value={blocklistStrictness}
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         setBlocklistStrictness(
-                          event.target.value as
-                            | "strict"
-                            | "balanced"
-                            | "relaxed",
+                          value as "strict" | "balanced" | "relaxed",
                         )
                       }
                     >
-                      <option value="strict">Strict</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="relaxed">Relaxed</option>
-                    </select>
+                      <SelectTrigger id="bl-strictness">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="strict">Strict</SelectItem>
+                        <SelectItem value="balanced">Balanced</SelectItem>
+                        <SelectItem value="relaxed">Relaxed</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="bl-interval">Refresh (min)</Label>
@@ -980,20 +991,21 @@ export function SettingsTab() {
               <div className="grid gap-3 xl:grid-cols-[1fr_auto]">
                 <div className="space-y-2">
                   <Label htmlFor="sync-profile">Sync profile</Label>
-                  <select
-                    id="sync-profile"
-                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  <Select
                     value={syncProfileDraft}
-                    onChange={(event) =>
-                      setSyncProfileDraft(event.target.value)
-                    }
+                    onValueChange={setSyncProfileDraft}
                   >
-                    <option value="full">Full replication</option>
-                    <option value="settings-only">Settings only</option>
-                    <option value="read-only-follower">
-                      Read-only follower
-                    </option>
-                  </select>
+                    <SelectTrigger id="sync-profile">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="full">Full replication</SelectItem>
+                      <SelectItem value="settings-only">Settings only</SelectItem>
+                      <SelectItem value="read-only-follower">
+                        Read-only follower
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="flex items-end">
                   <Button
@@ -1008,17 +1020,18 @@ export function SettingsTab() {
               <div className="grid gap-3 xl:grid-cols-[180px_minmax(0,1fr)_auto]">
                 <div className="space-y-2">
                   <Label htmlFor="transport-mode">Transport mode</Label>
-                  <select
-                    id="transport-mode"
-                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  <Select
                     value={syncTransportModeDraft}
-                    onChange={(event) =>
-                      setSyncTransportModeDraft(event.target.value)
-                    }
+                    onValueChange={setSyncTransportModeDraft}
                   >
-                    <option value="opportunistic">Opportunistic</option>
-                    <option value="https-required">HTTPS required</option>
-                  </select>
+                    <SelectTrigger id="transport-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="opportunistic">Opportunistic</SelectItem>
+                      <SelectItem value="https-required">HTTPS required</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="transport-token">Bearer token</Label>
