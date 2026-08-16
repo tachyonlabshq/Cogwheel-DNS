@@ -39,7 +39,7 @@ edition = "2024"
 license = "MIT"
 version = "0.1.0"
 authors = ["Tachyon Labs"]
-repository = "https://github.com/tachyonlabshq/Cogwheel-DNS"
+repository = "https://github.com/thekozugroup/Cogwheel-DNS"
 ```
 
 `[profile.release]`: `codegen-units = 1`, `lto = "thin"`, `strip = true`.

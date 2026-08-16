@@ -143,7 +143,7 @@ build_from_source() {
     command -v cargo >/dev/null 2>&1 ||
         die "cargo not found. Install a Rust toolchain (https://rustup.rs), or
      pass --tarball with a release artifact from
-     https://github.com/tachyonlabshq/Cogwheel-DNS/releases"
+     https://github.com/thekozugroup/Cogwheel-DNS/releases"
     command -v npm >/dev/null 2>&1 ||
         die "npm not found. Install Node.js 22+, or pass --tarball instead."
 

@@ -15,7 +15,7 @@ services:
     # works and will use the local Dockerfile; `COGWHEEL_IMAGE` in .env pins the
     # version you actually want in production (never leave it at `latest` on a
     # box you care about — see docs/release-policy.md).
-    image: ${COGWHEEL_IMAGE:-ghcr.io/tachyonlabshq/cogwheel-dns:latest}
+    image: ${COGWHEEL_IMAGE:-ghcr.io/thekozugroup/cogwheel-dns:latest}
     build:
       context: .
       dockerfile: Dockerfile

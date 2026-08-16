@@ -2,7 +2,7 @@
 #
 # Cogwheel DNS — one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/tachyonlabshq/Cogwheel-DNS/main/scripts/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 #
 # or, from a checkout:
 #
@@ -36,7 +36,7 @@ COGWHEEL_INSTALLER_VERSION="1.0.0"
 # --------------------------------------------------------------------------
 # Defaults. Every one is overridable by flag or environment.
 # --------------------------------------------------------------------------
-IMAGE="${COGWHEEL_IMAGE:-ghcr.io/tachyonlabshq/cogwheel-dns:latest}"
+IMAGE="${COGWHEEL_IMAGE:-ghcr.io/thekozugroup/cogwheel-dns:latest}"
 CONTAINER_NAME="${COGWHEEL_CONTAINER_NAME:-cogwheel}"
 VOLUME_NAME="${COGWHEEL_VOLUME_NAME:-cogwheel-data}"
 DNS_PORT="${COGWHEEL_DNS_PORT:-53}"
@@ -96,7 +96,7 @@ Usage:
 
 Options:
   --image REF           Container image to run
-                        (default: ghcr.io/tachyonlabshq/cogwheel-dns:latest)
+                        (default: ghcr.io/thekozugroup/cogwheel-dns:latest)
   --container NAME      Container name (default: cogwheel)
   --volume NAME         Docker volume for /app/data (default: cogwheel-data)
   --dns-port PORT       Host port clients send DNS to (default: 53)

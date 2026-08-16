@@ -274,9 +274,9 @@ ARG CREATED=1970-01-01T00:00:00Z
 ARG DEBIAN_SUITE
 LABEL org.opencontainers.image.title="Cogwheel DNS" \
       org.opencontainers.image.description="Rust DNS adblock appliance with per-device block profiles" \
-      org.opencontainers.image.url="https://github.com/tachyonlabshq/Cogwheel-DNS" \
-      org.opencontainers.image.source="https://github.com/tachyonlabshq/Cogwheel-DNS" \
-      org.opencontainers.image.documentation="https://github.com/tachyonlabshq/Cogwheel-DNS/blob/main/DEPLOYMENT.md" \
+      org.opencontainers.image.url="https://github.com/thekozugroup/Cogwheel-DNS" \
+      org.opencontainers.image.source="https://github.com/thekozugroup/Cogwheel-DNS" \
+      org.opencontainers.image.documentation="https://github.com/thekozugroup/Cogwheel-DNS/blob/main/DEPLOYMENT.md" \
       org.opencontainers.image.vendor="Tachyon Labs" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \

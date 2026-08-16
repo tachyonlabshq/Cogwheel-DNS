@@ -9,7 +9,7 @@ and uninstall all live there. This page is the short version.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tachyonlabshq/Cogwheel-DNS/main/scripts/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 ```
 
 Then point your router's DNS at the address the installer prints.

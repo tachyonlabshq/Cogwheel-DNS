@@ -56,7 +56,7 @@ All three end up in the same place: a non-root process with
 On the machine that will run Cogwheel:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tachyonlabshq/Cogwheel-DNS/main/scripts/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 ```
 
 Or from a checkout:
@@ -97,7 +97,7 @@ sudo ./scripts/install.sh --uninstall               # see §12
 ## 3. Docker Compose
 
 ```sh
-git clone https://github.com/tachyonlabshq/Cogwheel-DNS.git
+git clone https://github.com/thekozugroup/Cogwheel-DNS.git
 cd Cogwheel-DNS
 cp .env.example .env
 $EDITOR .env
@@ -130,7 +130,7 @@ it — the choice determines whether per-device block profiles work.
 For hosts where you do not want Docker at all.
 
 ```sh
-git clone https://github.com/tachyonlabshq/Cogwheel-DNS.git
+git clone https://github.com/thekozugroup/Cogwheel-DNS.git
 cd Cogwheel-DNS
 sudo ./scripts/install-native.sh
 ```
@@ -143,7 +143,7 @@ the port-53 conflict, and installs
 To skip the build and use a published release artifact instead:
 
 ```sh
-curl -fsSLO https://github.com/tachyonlabshq/Cogwheel-DNS/releases/latest/download/cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
+curl -fsSLO https://github.com/thekozugroup/Cogwheel-DNS/releases/latest/download/cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
 sudo ./scripts/install-native.sh --tarball cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
 ```
 
@@ -527,7 +527,7 @@ sudo ./scripts/install.sh
 upgrade is a reviewed change.
 
 ```sh
-$EDITOR .env                    # COGWHEEL_IMAGE=ghcr.io/tachyonlabshq/cogwheel-dns:1.2.3
+$EDITOR .env                    # COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:1.2.3
 docker compose pull
 docker compose up -d
 docker compose ps               # wait for healthy

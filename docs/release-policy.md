@@ -39,14 +39,14 @@ has no provenance and should not be trusted.
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify cogwheel-1.2.3-aarch64-unknown-linux-gnu.tar.gz -R tachyonlabshq/Cogwheel-DNS
-gh attestation verify oci://ghcr.io/tachyonlabshq/cogwheel-dns:1.2.3 -R tachyonlabshq/Cogwheel-DNS
+gh attestation verify cogwheel-1.2.3-aarch64-unknown-linux-gnu.tar.gz -R thekozugroup/Cogwheel-DNS
+gh attestation verify oci://ghcr.io/thekozugroup/cogwheel-dns:1.2.3 -R thekozugroup/Cogwheel-DNS
 ```
 
 ### Version pinning for operators
 
 Production deployments pin an exact tag in `.env`
-(`COGWHEEL_IMAGE=ghcr.io/tachyonlabshq/cogwheel-dns:1.2.3`). Tracking `latest`
+(`COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:1.2.3`). Tracking `latest`
 turns every `docker compose pull` into an unreviewed upgrade of a household's
 DNS resolver.
 
