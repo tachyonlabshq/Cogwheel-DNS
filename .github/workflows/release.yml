@@ -142,7 +142,16 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          push: true
+          # NOT `push: true`. The push is declared inside `outputs` below, and
+          # the action turns `push: true` into a SECOND `--output type=image,
+          # push=true` -- one with no name attached. Buildx accepts both and
+          # then fails the job with "tag is needed when pushing to registry".
+          # This matches docker/build-push-action's own push-by-digest example.
+          #
+          # provenance must stay false: buildx would otherwise attach an
+          # attestation manifest to each per-arch push, and `imagetools create`
+          # in the next job would fold those into the manifest list as if they
+          # were platforms.
           provenance: false
           build-args: |
             VERSION=${{ needs.meta.outputs.version }}
