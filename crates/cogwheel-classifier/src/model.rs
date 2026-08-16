@@ -17,6 +17,7 @@
 //! Only the 2^20-entry n-gram block is quantised. The 18 dense weights stay `f32` — they are 72
 //! bytes and they carry disproportionate signal, so there is no reason to add error to them.
 
+use crate::adapt::Delta;
 use crate::features::{self, Features, N_BUCKETS, N_DENSE, NGRAM_MAX, NGRAM_MIN};
 
 /// File magic. Bump the trailing digit if the layout changes incompatibly.
@@ -350,6 +351,39 @@ impl Model {
         accumulator + hashed * self.ngram_scale
     }
 
+    /// The raw linear score before calibration, for pre-extracted features.
+    ///
+    /// Exposed so [`crate::adapt`] can hold the base's opinion fixed while it learns a correction to
+    /// it, rather than re-deriving it from a probability.
+    pub fn logit_from_features(&self, features: &Features) -> f32 {
+        self.logit(features)
+    }
+
+    /// The raw linear score with an optional additive correction applied.
+    ///
+    /// Both terms are linear in the same feature vector, so this is still one linear model — which
+    /// is why [`Self::explain_with_delta`] can still decompose it exactly.
+    pub fn logit_with_delta(&self, features: &Features, delta: Option<&Delta>) -> f32 {
+        let base = self.logit(features);
+        match delta {
+            Some(delta) => base + delta.logit_shift(features),
+            None => base,
+        }
+    }
+
+    /// The Platt scaling parameters, as `(slope, intercept)`.
+    ///
+    /// Adaptation trains against the *calibrated* probability, because that is the quantity the
+    /// thresholds and the promotion gate are expressed in, so it needs the slope in its gradient.
+    pub fn calibration(&self) -> (f32, f32) {
+        (self.platt_a, self.platt_b)
+    }
+
+    /// Map a raw logit to a calibrated probability.
+    pub fn calibrate(&self, logit: f32) -> f32 {
+        1.0 / (1.0 + (-(self.platt_a * logit + self.platt_b)).exp())
+    }
+
     /// Calibrated probability that `host` is an ad or tracking domain.
     ///
     /// `host` must already be normalised by [`crate::normalize::normalize`].
@@ -360,8 +394,24 @@ impl Model {
     /// Probability for pre-extracted features, so callers that also want an explanation do not pay
     /// for extraction twice.
     pub fn probability_from_features(&self, features: &Features) -> f32 {
-        let calibrated = self.platt_a * self.logit(features) + self.platt_b;
-        1.0 / (1.0 + (-calibrated).exp())
+        self.probability_from_features_with_delta(features, None)
+    }
+
+    /// Calibrated probability with an optional adaptation delta applied.
+    ///
+    /// `host` must already be normalised by [`crate::normalize::normalize`]. Passing `None` is
+    /// bit-identical to [`Self::probability`].
+    pub fn probability_with_delta(&self, host: &str, delta: Option<&Delta>) -> f32 {
+        self.probability_from_features_with_delta(&features::extract(host), delta)
+    }
+
+    /// Calibrated probability for pre-extracted features, with an optional delta applied.
+    pub fn probability_from_features_with_delta(
+        &self,
+        features: &Features,
+        delta: Option<&Delta>,
+    ) -> f32 {
+        self.calibrate(self.logit_with_delta(features, delta))
     }
 
     /// Calibrated operating thresholds.
@@ -391,11 +441,28 @@ impl Model {
     /// reported by the n-gram text that produced them, recovered by re-hashing the candidate
     /// substrings and matching buckets.
     pub fn explain(&self, host: &str, top_k: usize) -> Vec<Contribution> {
+        self.explain_with_delta(host, top_k, None)
+    }
+
+    /// Signed per-feature contributions with an adaptation delta folded in.
+    ///
+    /// The delta is additive on the same features, so `(w + Δw)·x` is still the exact contribution
+    /// of that feature — adaptation does not cost the model its explainability, which is the reason
+    /// the correction was constrained to be linear in the first place. A UI showing an adapted score
+    /// must call this rather than [`Self::explain`], or it will attribute the score to weights that
+    /// are not the ones that produced it.
+    pub fn explain_with_delta(
+        &self,
+        host: &str,
+        top_k: usize,
+        delta: Option<&Delta>,
+    ) -> Vec<Contribution> {
         let features = features::extract(host);
         let mut contributions: Vec<Contribution> = Vec::new();
 
         for (index, value) in features.dense.iter().enumerate() {
-            let weight = self.dense_weights[index] * value;
+            let adjustment = delta.map_or(0.0, |delta| delta.dense()[index]);
+            let weight = (self.dense_weights[index] + adjustment) * value;
             if weight.abs() > f32::EPSILON {
                 contributions.push(Contribution {
                     label: DENSE_FEATURE_NAMES[index].to_string(),
@@ -416,8 +483,10 @@ impl Model {
             let Some(feature_value) = bucket_weights.get(&bucket) else {
                 continue;
             };
-            let weight =
-                f32::from(self.ngram_weights[bucket as usize]) * feature_value * self.ngram_scale;
+            let adjustment = delta.map_or(0.0, |delta| delta.ngram_weight(bucket));
+            let weight = (f32::from(self.ngram_weights[bucket as usize]) * self.ngram_scale
+                + adjustment)
+                * feature_value;
             if weight.abs() > f32::EPSILON {
                 contributions.push(Contribution {
                     label: text,
@@ -635,5 +704,56 @@ mod tests {
     #[test]
     fn resident_size_is_within_budget() {
         assert!(test_model().resident_bytes() <= 16 * 1024 * 1024);
+    }
+
+    /// Adaptation must be free when it is absent: `None` has to be the same arithmetic as the
+    /// unadapted path, not merely a close approximation of it.
+    #[test]
+    fn a_none_delta_scores_bit_identically() {
+        let model = test_model();
+        for host in ["ads.example.com", "example.com", "a.b.c.example.org"] {
+            assert_eq!(
+                model.probability_with_delta(host, None),
+                model.probability(host)
+            );
+            assert_eq!(
+                model.explain_with_delta(host, 8, None),
+                model.explain(host, 8)
+            );
+        }
+    }
+
+    #[test]
+    fn a_delta_shifts_the_logit_by_exactly_its_own_contribution() {
+        let model = test_model();
+        let delta = crate::adapt::Delta::for_test(0.75, [0.0; N_DENSE], &[]);
+        let features = features::extract("ads.example.com");
+        let base = model.logit_with_delta(&features, None);
+        let adapted = model.logit_with_delta(&features, Some(&delta));
+        assert!((adapted - base - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn explain_with_delta_reports_the_corrected_weights() {
+        let model = test_model();
+        let mut dense = [0.0f32; N_DENSE];
+        dense[7] = -1.0; // the base carries +2.5 on this feature
+        let delta = crate::adapt::Delta::for_test(0.0, dense, &[]);
+
+        let value_of = |contributions: &[Contribution]| {
+            contributions
+                .iter()
+                .find(|c| c.label == "ad-tech tokens in hostname")
+                .map(|c| c.value)
+                .unwrap_or_default()
+        };
+        let base = value_of(&model.explain("adserver.example.com", 24));
+        let adapted = value_of(&model.explain_with_delta("adserver.example.com", 24, Some(&delta)));
+        assert!(base > 0.0);
+        // 2.5 -> 1.5 on the same feature value, so the contribution must fall by exactly 40%.
+        assert!(
+            (adapted / base - 0.6).abs() < 1e-4,
+            "expected the contribution to shrink to 60%, got {adapted} from {base}"
+        );
     }
 }

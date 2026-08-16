@@ -56,6 +56,42 @@ jobs:
       - name: Deny
         run: cargo deny check
 
+  # The reference deployment target is a Raspberry Pi 5, so aarch64 has to be a build the CI
+  # actually performs rather than one the docs assume. The classifier does byte-level feature
+  # extraction and parses a binary model file, which is exactly the kind of code that can compile
+  # on one architecture and misbehave on another, so the tests are run under emulation too.
+  # Timing budgets are suspended there (qemu is 10-50x slower than native and its numbers mean
+  # nothing); correctness is not.
+  aarch64:
+    name: aarch64 (Raspberry Pi target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross toolchain and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user-static
+
+      - name: Cross-compile the server
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu -p cogwheel-server
+
+      - name: Run the classifier suite under aarch64 emulation
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static -L /usr/aarch64-linux-gnu
+          COGWHEEL_PERF_ASSERTS: "off"
+        run: cargo test --release --target aarch64-unknown-linux-gnu -p cogwheel-classifier --all-features
+
   web:
     name: web
     runs-on: ubuntu-latest

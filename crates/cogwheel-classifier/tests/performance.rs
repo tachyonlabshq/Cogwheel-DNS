@@ -42,6 +42,28 @@ const P50_BUDGET_MICROS: f64 = 60.0;
 /// still fires on order-of-magnitude regressions in both profiles.
 const DEBUG_ALLOWANCE: f64 = 40.0;
 
+/// Whether timing assertions should be enforced.
+///
+/// Under an instruction emulator (`qemu-aarch64`, used to cross-test this crate for the Raspberry
+/// Pi target) wall-clock timings run 10-50x slower than native, so asserting on them produces a
+/// failure that says nothing about the code. Correctness tests still run and still matter there —
+/// only the budgets are suspended, and loudly, so this cannot be quietly set in CI to make a real
+/// regression disappear.
+///
+/// On a real Raspberry Pi, running natively, the budgets SHOULD hold and are left enforced.
+fn timing_asserts_enabled() -> bool {
+    match std::env::var("COGWHEEL_PERF_ASSERTS") {
+        Ok(value) if value.eq_ignore_ascii_case("off") => {
+            println!(
+                "!! COGWHEEL_PERF_ASSERTS=off - timing budgets NOT enforced (emulated run); \
+                 measurements below are not meaningful"
+            );
+            false
+        }
+        _ => true,
+    }
+}
+
 /// Scale factor applied to budgets for the current build profile.
 fn allowance() -> f64 {
     if cfg!(debug_assertions) {
@@ -102,7 +124,7 @@ fn inference_meets_the_throughput_floor() {
         hosts.len()
     );
     assert!(
-        throughput >= floor,
+        !timing_asserts_enabled() || throughput >= floor,
         "throughput {throughput:.0}/s fell below the {floor:.0}/s floor for the {} profile",
         profile()
     );
@@ -145,13 +167,14 @@ fn worst_case_latency_stays_within_budget() {
     );
 
     let p50_budget = P50_BUDGET_MICROS * allowance();
+    let enforce_timing = timing_asserts_enabled();
     assert!(
-        p50 <= p50_budget,
+        !enforce_timing || p50 <= p50_budget,
         "p50 latency {p50:.1}us exceeded the {p50_budget:.0}us budget for the {} profile",
         profile()
     );
     assert!(
-        p99 <= budget,
+        !enforce_timing || p99 <= budget,
         "p99 latency {p99:.1}us exceeded the {budget:.0}us budget for the {} profile",
         profile()
     );
@@ -232,7 +255,7 @@ fn hot_path_lookup_is_constant_time_and_allocation_light() {
     // A cache miss must be dramatically cheaper than an inference; if someone wires scoring back
     // into `lookup`, this catches it.
     assert!(
-        per_lookup_nanos < budget,
+        !timing_asserts_enabled() || per_lookup_nanos < budget,
         "hot-path lookup cost {per_lookup_nanos:.0}ns — is inference back on the hot path?"
     );
 }
@@ -295,5 +318,89 @@ fn verdict_cache_memory_stays_bounded_under_churn() {
     assert!(
         cached <= 1_024 + 16,
         "verdict cache grew past capacity: {cached}"
+    );
+}
+
+/// Adaptation must cost the *scoring* path a little and the *hot* path nothing.
+///
+/// A delta adds one sparse-map probe per non-zero n-gram bucket, so it makes inference somewhat
+/// slower — that is paid on the background scoring worker, which is rate-limited anyway. What must
+/// not change is `lookup`, which the resolver calls on every query and which never consults the
+/// delta at all. Both halves are asserted here so a future refactor that moves the delta read onto
+/// the hot path is caught immediately.
+#[test]
+fn adaptation_costs_the_scoring_path_a_little_and_the_hot_path_nothing() {
+    let model = embedded_model().expect("parse");
+    let hosts = sample_hosts();
+
+    // A realistically wide delta: a few hundred hosts of feedback touches tens of thousands of
+    // buckets, which is the worst case for the per-bucket probe.
+    let feedback: Vec<cogwheel_classifier::Feedback> = hosts
+        .iter()
+        .take(300)
+        .enumerate()
+        .map(|(index, host)| cogwheel_classifier::Feedback {
+            host: host.clone(),
+            is_ad: index % 3 == 0,
+            observed_at: chrono::Utc::now(),
+        })
+        .collect();
+    let delta = cogwheel_classifier::train_delta(
+        &model,
+        &feedback,
+        cogwheel_classifier::AdaptConfig::default(),
+    );
+    assert!(delta.ngram_entries() > 1_000, "expected a wide delta");
+
+    for host in hosts.iter().take(500) {
+        std::hint::black_box(model.probability_with_delta(host, Some(&delta)));
+    }
+
+    let started = Instant::now();
+    for host in &hosts {
+        std::hint::black_box(model.probability_with_delta(host, Some(&delta)));
+    }
+    let adapted = hosts.len() as f64 / started.elapsed().as_secs_f64();
+
+    let started = Instant::now();
+    for host in &hosts {
+        std::hint::black_box(model.probability(host));
+    }
+    let plain = hosts.len() as f64 / started.elapsed().as_secs_f64();
+
+    println!(
+        "[{}] scoring {plain:.0}/s base vs {adapted:.0}/s with a {}-entry delta ({:.2}x)",
+        profile(),
+        delta.ngram_entries(),
+        plain / adapted
+    );
+    assert!(
+        !timing_asserts_enabled() || adapted >= THROUGHPUT_FLOOR / allowance() / 2.0,
+        "scoring with a delta fell below half the throughput floor: {adapted:.0}/s"
+    );
+
+    // The hot path: an engine carrying an active delta must look up exactly as fast as one without,
+    // because `lookup` reads a shard map and nothing else.
+    let (engine, _worker) = ClassifierEngine::new(
+        embedded_model().expect("parse"),
+        Allowlist::builtin(),
+        ClassifierSettings::default(),
+        EngineConfig::default(),
+    );
+    engine.set_active_delta(Some(std::sync::Arc::new(delta)));
+
+    let started = Instant::now();
+    for host in &hosts {
+        std::hint::black_box(engine.lookup(host));
+    }
+    let per_lookup_nanos = started.elapsed().as_secs_f64() * 1e9 / hosts.len() as f64;
+    let budget = 5_000.0 * allowance();
+    println!(
+        "[{}] cold lookup with an active delta {per_lookup_nanos:.0} ns/query; budget {budget:.0} ns",
+        profile()
+    );
+    assert!(
+        !timing_asserts_enabled() || per_lookup_nanos < budget,
+        "hot-path lookup cost {per_lookup_nanos:.0}ns with a delta active — is the delta read on the hot path?"
     );
 }

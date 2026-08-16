@@ -640,6 +640,31 @@ async fn main() -> Result<()> {
         cogwheel_classifier::EngineConfig::default(),
     );
     let classifier_engine = Arc::new(classifier_engine);
+    // Restore a previously promoted adaptation. It is re-validated by `Delta::from_hex` on the way
+    // in — magic, geometry, checksum and the logit budget — because the row came off a disk that may
+    // have lost power mid-write. A delta that fails any of those is dropped with a warning rather
+    // than applied or fatal: the base model is untouched, so the appliance keeps working exactly as
+    // shipped, which is the whole reason adaptation was built as a separate object.
+    if let Some(stored) = load_classifier_adaptation(&storage).await? {
+        match cogwheel_classifier::Delta::from_hex(&stored.delta_hex) {
+            Ok(delta) => {
+                tracing::info!(
+                    trained_at = stored.trained_at,
+                    example_count = stored.example_count,
+                    roc_auc = stored.roc_auc,
+                    ngram_entries = delta.ngram_entries(),
+                    "classifier adaptation restored"
+                );
+                classifier_engine.set_active_delta(Some(Arc::new(delta)));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "stored classifier adaptation failed validation; staying on the base model"
+                );
+            }
+        }
+    }
     std::thread::Builder::new()
         .name("cogwheel-classifier".to_string())
         .spawn(move || {
@@ -1082,6 +1107,12 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/classifier/inspect", post(inspect_domain))
         .route("/api/v1/classifier/detections", get(classifier_detections))
+        .route("/api/v1/classifier/feedback", post(classifier_feedback))
+        .route("/api/v1/classifier/adapt", post(classifier_adapt))
+        .route(
+            "/api/v1/classifier/adapt/rollback",
+            post(classifier_adapt_rollback),
+        )
         .route(
             "/api/v1/settings/classifier",
             post(update_classifier_settings),
@@ -4430,6 +4461,75 @@ async fn load_classifier_settings(storage: &Storage) -> Result<ClassifierSetting
     Ok(serde_json::from_str(&value).unwrap_or_default())
 }
 
+/// Feedback the household has given but that has not yet been folded into an adaptation.
+///
+/// Kept as one JSON blob in the `settings` table rather than a table of its own: it is bounded to
+/// [`MAX_PENDING_FEEDBACK`] rows, it is only ever read and written whole, and it then rides the
+/// existing backup and sync paths for free.
+async fn load_classifier_feedback(storage: &Storage) -> Result<Vec<cogwheel_classifier::Feedback>> {
+    let Some(value) = storage.get_setting("classifier_feedback").await? else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str(&value).unwrap_or_default())
+}
+
+async fn persist_classifier_feedback(
+    storage: &Storage,
+    feedback: &[cogwheel_classifier::Feedback],
+) -> Result<()> {
+    storage
+        .upsert_setting("classifier_feedback", &serde_json::to_string(feedback)?)
+        .await?;
+    Ok(())
+}
+
+/// The promoted adaptation, with the measurements that justified promoting it.
+///
+/// The delta itself is hex because the `settings` table stores `TEXT`. The measurements are stored
+/// alongside it rather than recomputed on read: they are the *evidence* for this specific delta, and
+/// recomputing them at boot would cost 25,000 inferences every restart to rediscover a number that
+/// cannot have changed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAdaptation {
+    delta_hex: String,
+    roc_auc: f32,
+    false_positive_rate: [f32; 3],
+    example_count: usize,
+    trained_at: i64,
+}
+
+async fn load_classifier_adaptation(storage: &Storage) -> Result<Option<StoredAdaptation>> {
+    let Some(value) = storage.get_setting("classifier_adaptation").await? else {
+        return Ok(None);
+    };
+    // An empty value is how rollback records "no adaptation"; the settings table has no delete.
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str(&value) {
+        Ok(stored) => Ok(Some(stored)),
+        Err(error) => {
+            // Never fail the boot over this. The base model is intact by construction, so an
+            // unreadable adaptation costs quality, not availability.
+            tracing::warn!(%error, "stored classifier adaptation is unreadable; staying on the base model");
+            Ok(None)
+        }
+    }
+}
+
+async fn persist_classifier_adaptation(storage: &Storage, stored: &StoredAdaptation) -> Result<()> {
+    storage
+        .upsert_setting("classifier_adaptation", &serde_json::to_string(stored)?)
+        .await?;
+    Ok(())
+}
+
+async fn clear_classifier_adaptation(storage: &Storage) -> Result<()> {
+    storage.upsert_setting("classifier_adaptation", "").await?;
+    Ok(())
+}
+
 async fn load_notification_settings(storage: &Storage) -> Result<NotificationSettings> {
     let Some(value) = storage.get_setting("notification_settings").await? else {
         return Ok(NotificationSettings {
@@ -6167,6 +6267,26 @@ struct ClassifierEngineStats {
     cached_entries: u64,
 }
 
+/// What adaptation is doing right now, and on what evidence.
+///
+/// Everything here is reported rather than summarised into a single "adapted: yes/no", because the
+/// point of gating a delta on measurements is lost if the user cannot see the measurements.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierAdaptationInfo {
+    active: bool,
+    trained_at: Option<String>,
+    example_count: usize,
+    ngram_entries: usize,
+    roc_auc: Option<f32>,
+    false_positive_rate: Option<SensitivityBand>,
+    /// The delta's certified worst-case effect on any logit, and the ceiling it is held under.
+    max_logit_shift: f32,
+    logit_budget: f32,
+    pending_feedback: usize,
+    minimum_feedback: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClassifierStatusResponse {
@@ -6174,9 +6294,51 @@ struct ClassifierStatusResponse {
     model: ClassifierModelInfo,
     stats: ClassifierEngineStats,
     active_threshold: f32,
+    adaptation: ClassifierAdaptationInfo,
 }
 
-fn build_classifier_status(state: &ServerState) -> ClassifierStatusResponse {
+/// Describe the engine's current adaptation state.
+///
+/// `stored` carries the measurements the gate recorded when the delta was promoted; the delta itself
+/// is read back from the engine so the report describes what is actually scoring traffic rather than
+/// what the database believes should be.
+fn build_adaptation_info(
+    state: &ServerState,
+    stored: Option<&StoredAdaptation>,
+    pending_feedback: usize,
+) -> ClassifierAdaptationInfo {
+    let delta = state.dns_runtime.classifier().active_delta();
+    // The stored measurements are evidence *for a specific delta*. If that delta is not the one
+    // scoring traffic -- it failed validation at boot, or was rolled back -- reporting its figures
+    // would advertise quality nothing is currently delivering, so they are withheld with it.
+    let evidence = stored.filter(|_| delta.is_some());
+    ClassifierAdaptationInfo {
+        active: delta.is_some(),
+        trained_at: delta.as_ref().and_then(|delta| {
+            chrono::DateTime::from_timestamp(delta.trained_at(), 0)
+                .map(|timestamp| timestamp.to_rfc3339())
+        }),
+        example_count: delta.as_ref().map_or(0, |delta| delta.example_count()),
+        ngram_entries: delta.as_ref().map_or(0, |delta| delta.ngram_entries()),
+        roc_auc: evidence.map(|stored| stored.roc_auc),
+        false_positive_rate: evidence.map(|stored| SensitivityBand {
+            low: stored.false_positive_rate[0],
+            balanced: stored.false_positive_rate[1],
+            high: stored.false_positive_rate[2],
+        }),
+        max_logit_shift: delta
+            .as_ref()
+            .map_or(0.0, |delta| delta.certified_max_logit_shift()),
+        logit_budget: cogwheel_classifier::adapt::DELTA_LOGIT_BUDGET,
+        pending_feedback,
+        minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
+    }
+}
+
+fn build_classifier_status(
+    state: &ServerState,
+    adaptation: ClassifierAdaptationInfo,
+) -> ClassifierStatusResponse {
     let engine = state.dns_runtime.classifier();
     let model = engine.model();
     let quality = model.quality();
@@ -6220,14 +6382,23 @@ fn build_classifier_status(state: &ServerState) -> ClassifierStatusResponse {
             cached_entries: stats.cached_entries,
         },
         active_threshold: engine.active_threshold(),
+        adaptation,
     }
 }
 
 async fn classifier_status(
     State(state): State<ServerState>,
 ) -> Json<ApiEnvelope<ClassifierStatusResponse>> {
+    let stored = load_classifier_adaptation(&state.storage)
+        .await
+        .unwrap_or_default();
+    let pending = load_classifier_feedback(&state.storage)
+        .await
+        .unwrap_or_default()
+        .len();
+    let adaptation = build_adaptation_info(&state, stored.as_ref(), pending);
     Json(ApiEnvelope {
-        data: build_classifier_status(&state),
+        data: build_classifier_status(&state, adaptation),
     })
 }
 
@@ -6319,6 +6490,275 @@ struct DetectionView {
 struct DetectionsQuery {
     #[serde(default)]
     limit: Option<usize>,
+}
+
+// ------------------------------------------------------- classifier adaptation API
+
+/// Most feedback items retained. Beyond this the oldest are dropped.
+///
+/// A household reports a handful of mistakes a month, so this is years of headroom — but the row is
+/// read and written whole on every submission, and an unbounded one would eventually make a single
+/// feedback click cost a multi-megabyte round trip through SQLite.
+const MAX_PENDING_FEEDBACK: usize = 5_000;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierFeedbackRequest {
+    domain: String,
+    is_ad: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierFeedbackResponse {
+    domain: String,
+    is_ad: bool,
+    pending_feedback: usize,
+    minimum_feedback: usize,
+}
+
+/// Record one correction from the household.
+///
+/// Nothing is trained here. Feedback only accumulates; turning it into a model change is an explicit
+/// second step (`/adapt`) that has to pass the gate, so a stream of clicks can never quietly become
+/// a behaviour change.
+async fn classifier_feedback(
+    State(state): State<ServerState>,
+    Json(request): Json<ClassifierFeedbackRequest>,
+) -> Result<Json<ApiEnvelope<ClassifierFeedbackResponse>>, axum::http::StatusCode> {
+    // Bound the input before doing any work: this endpoint is reachable by anything on the LAN.
+    if request.domain.len() > cogwheel_classifier::normalize::MAX_HOST_LEN {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    // Normalise at the door rather than at training time. An unscoreable name is a client bug or a
+    // typo, and the household deserves to be told now instead of having it silently discarded weeks
+    // later when someone presses Adapt.
+    let domain = cogwheel_classifier::normalize(&request.domain)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let mut feedback = load_classifier_feedback(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    // One live claim per host: a later report replaces an earlier one rather than stacking with it,
+    // so a household that changes its mind is not training the model on both answers.
+    feedback.retain(|item| item.host != domain);
+    feedback.push(cogwheel_classifier::Feedback {
+        host: domain.clone(),
+        is_ad: request.is_ad,
+        observed_at: chrono::Utc::now(),
+    });
+    while feedback.len() > MAX_PENDING_FEEDBACK {
+        feedback.remove(0);
+    }
+
+    persist_classifier_feedback(&state.storage, &feedback)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: ClassifierFeedbackResponse {
+            domain,
+            is_ad: request.is_ad,
+            pending_feedback: feedback.len(),
+            minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdaptationOutcomeView {
+    /// `promoted`, `rejected` or `notEnoughData`.
+    status: String,
+    promoted: bool,
+    /// Set only on rejection, and always specific about which criterion failed.
+    reason: Option<String>,
+    /// ROC-AUC of base+delta on the committed holdout, when it was measured.
+    roc_auc: Option<f32>,
+    /// False-positive rate of base+delta at the three calibrated thresholds.
+    false_positive_rate: Option<SensitivityBand>,
+    example_count: Option<usize>,
+    /// Feedback available, when there was not enough of it to judge.
+    have: Option<usize>,
+    /// Feedback required.
+    need: Option<usize>,
+    adaptation: ClassifierAdaptationInfo,
+}
+
+/// Train a correction from the pending feedback, measure it, and keep it only if it holds up.
+///
+/// The base model is never touched. On rejection the previously active delta (if any) is also left
+/// exactly as it was: a failed adaptation attempt is a no-op, not a rollback.
+async fn classifier_adapt(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<AdaptationOutcomeView>>, axum::http::StatusCode> {
+    let feedback = load_classifier_feedback(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Training is a few thousand sparse SGD steps and the gate is 25,000 inferences. That is tens to
+    // hundreds of milliseconds of pure CPU, and running it on the async runtime would stall the DNS
+    // listeners sharing this executor on a 4-core Pi -- the exact mistake the scoring worker exists
+    // to avoid.
+    let base = state.dns_runtime.classifier().model().clone();
+    let (delta, outcome) = tokio::task::spawn_blocking(move || {
+        let delta = cogwheel_classifier::train_delta(
+            &base,
+            &feedback,
+            cogwheel_classifier::AdaptConfig::default(),
+        );
+        let outcome = cogwheel_classifier::evaluate_and_gate(
+            &base,
+            &delta,
+            &cogwheel_classifier::embedded_holdout(),
+            base.quality(),
+        );
+        (delta, outcome)
+    })
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut view = match &outcome {
+        cogwheel_classifier::AdaptationOutcome::Promoted {
+            auc,
+            false_positive_rate,
+            example_count,
+        } => AdaptationOutcomeView {
+            status: "promoted".to_string(),
+            promoted: true,
+            reason: None,
+            roc_auc: Some(*auc),
+            false_positive_rate: Some(SensitivityBand {
+                low: false_positive_rate[0],
+                balanced: false_positive_rate[1],
+                high: false_positive_rate[2],
+            }),
+            example_count: Some(*example_count),
+            have: None,
+            need: None,
+            adaptation: build_adaptation_info(&state, None, 0),
+        },
+        cogwheel_classifier::AdaptationOutcome::Rejected {
+            reason,
+            auc,
+            false_positive_rate,
+        } => AdaptationOutcomeView {
+            status: "rejected".to_string(),
+            promoted: false,
+            reason: Some(reason.clone()),
+            roc_auc: Some(*auc),
+            false_positive_rate: Some(SensitivityBand {
+                low: false_positive_rate[0],
+                balanced: false_positive_rate[1],
+                high: false_positive_rate[2],
+            }),
+            example_count: None,
+            have: None,
+            need: None,
+            adaptation: build_adaptation_info(&state, None, 0),
+        },
+        cogwheel_classifier::AdaptationOutcome::NotEnoughData { have, need } => {
+            AdaptationOutcomeView {
+                status: "notEnoughData".to_string(),
+                promoted: false,
+                reason: None,
+                roc_auc: None,
+                false_positive_rate: None,
+                example_count: None,
+                have: Some(*have),
+                need: Some(*need),
+                adaptation: build_adaptation_info(&state, None, 0),
+            }
+        }
+    };
+
+    if let cogwheel_classifier::AdaptationOutcome::Promoted {
+        auc,
+        false_positive_rate,
+        example_count,
+    } = &outcome
+    {
+        let stored = StoredAdaptation {
+            delta_hex: delta.to_hex(),
+            roc_auc: *auc,
+            false_positive_rate: *false_positive_rate,
+            example_count: *example_count,
+            trained_at: delta.trained_at(),
+        };
+        persist_classifier_adaptation(&state.storage, &stored)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        state
+            .dns_runtime
+            .classifier()
+            .set_active_delta(Some(Arc::new(delta)));
+        tracing::info!(
+            roc_auc = *auc,
+            example_count = *example_count,
+            "classifier adaptation promoted"
+        );
+    } else if let cogwheel_classifier::AdaptationOutcome::Rejected { reason, .. } = &outcome {
+        tracing::info!(reason = %reason, "classifier adaptation rejected by the quality gate");
+    }
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "classifier-adaptation.evaluated".to_string(),
+            payload: serde_json::to_string(&view)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Rebuild the adaptation block after the engine has been updated, so the response describes the
+    // state the caller is now in rather than the one it was in a moment ago.
+    let stored = load_classifier_adaptation(&state.storage)
+        .await
+        .unwrap_or_default();
+    let pending = load_classifier_feedback(&state.storage)
+        .await
+        .unwrap_or_default()
+        .len();
+    view.adaptation = build_adaptation_info(&state, stored.as_ref(), pending);
+
+    Ok(Json(ApiEnvelope { data: view }))
+}
+
+/// Discard the active delta and return to the shipped model.
+///
+/// This is the entire rollback story, and it is deliberately this small: the base was never
+/// modified, so there is nothing to restore. Pending feedback is left alone — the household's
+/// corrections are their data, not a side effect of an adaptation they chose to undo.
+async fn classifier_adapt_rollback(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<ClassifierAdaptationInfo>>, axum::http::StatusCode> {
+    clear_classifier_adaptation(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.dns_runtime.classifier().set_active_delta(None);
+    tracing::info!("classifier adaptation rolled back to the base model");
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "classifier-adaptation.rolled-back".to_string(),
+            payload: "{}".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pending = load_classifier_feedback(&state.storage)
+        .await
+        .unwrap_or_default()
+        .len();
+    Ok(Json(ApiEnvelope {
+        data: build_adaptation_info(&state, None, pending),
+    }))
 }
 
 async fn classifier_detections(
@@ -6538,6 +6978,131 @@ mod tests {
             cogwheel_classifier::Sensitivity::Balanced,
             "an unknown legacy field should fall back to the default sensitivity"
         );
+    }
+
+    /// The stored adaptation row has to survive a restart intact, delta bytes included — it is the
+    /// only copy of a correction the user explicitly approved.
+    #[test]
+    fn stored_adaptation_round_trips_through_the_settings_table() {
+        let base = cogwheel_classifier::embedded_model().expect("embedded model must parse");
+        let feedback: Vec<cogwheel_classifier::Feedback> = (0..40)
+            .map(|index| cogwheel_classifier::Feedback {
+                host: format!("h{index}.example{index}.com"),
+                is_ad: index % 3 == 0,
+                observed_at: chrono::Utc::now(),
+            })
+            .collect();
+        let delta = cogwheel_classifier::train_delta(
+            &base,
+            &feedback,
+            cogwheel_classifier::AdaptConfig::default(),
+        );
+
+        let stored = StoredAdaptation {
+            delta_hex: delta.to_hex(),
+            roc_auc: 0.8912,
+            false_positive_rate: [0.001, 0.005, 0.023],
+            example_count: delta.example_count(),
+            trained_at: delta.trained_at(),
+        };
+        let encoded = serde_json::to_string(&stored).expect("encode");
+        assert!(
+            encoded.contains("\"deltaHex\"") && encoded.contains("\"falsePositiveRate\""),
+            "stored adaptation must use the camelCase convention: {encoded}"
+        );
+
+        let decoded: StoredAdaptation = serde_json::from_str(&encoded).expect("decode");
+        let restored =
+            cogwheel_classifier::Delta::from_hex(&decoded.delta_hex).expect("delta must reload");
+        assert_eq!(restored.example_count(), delta.example_count());
+        for host in ["h1.example1.com", "chase.com", "doubleclick.net"] {
+            assert_eq!(
+                base.probability_with_delta(host, Some(&restored)),
+                base.probability_with_delta(host, Some(&delta)),
+                "{host} scored differently after a persistence round trip"
+            );
+        }
+    }
+
+    /// A delta row corrupted on disk must be dropped, not applied. `Delta::from_hex` is the gate for
+    /// that, so pin the fact that the server's restore path actually gets an error out of it.
+    #[test]
+    fn a_corrupt_stored_delta_is_rejected_rather_than_applied() {
+        let base = cogwheel_classifier::embedded_model().expect("parse");
+        let feedback: Vec<cogwheel_classifier::Feedback> = (0..40)
+            .map(|index| cogwheel_classifier::Feedback {
+                host: format!("h{index}.example{index}.com"),
+                is_ad: index % 3 == 0,
+                observed_at: chrono::Utc::now(),
+            })
+            .collect();
+        let delta = cogwheel_classifier::train_delta(
+            &base,
+            &feedback,
+            cogwheel_classifier::AdaptConfig::default(),
+        );
+        let mut hex = delta.to_hex();
+        assert!(hex.len() > 200);
+        // Flip one nibble deep in the weight block.
+        let position = hex.len() - 11;
+        hex.replace_range(position..position + 1, "f");
+        assert!(
+            cogwheel_classifier::Delta::from_hex(&hex).is_err()
+                || cogwheel_classifier::Delta::from_hex(&hex) == Ok(delta),
+            "a corrupted delta must not silently become a different valid delta"
+        );
+
+        assert!(cogwheel_classifier::Delta::from_hex("not hex at all").is_err());
+        assert!(cogwheel_classifier::Delta::from_hex("").is_err());
+    }
+
+    #[test]
+    fn classifier_feedback_request_uses_camel_case() {
+        let request: ClassifierFeedbackRequest =
+            serde_json::from_str(r#"{"domain":"ads.example.com","isAd":true}"#).expect("decode");
+        assert_eq!(request.domain, "ads.example.com");
+        assert!(request.is_ad);
+    }
+
+    #[test]
+    fn adaptation_outcome_view_serialises_in_camel_case() {
+        let view = AdaptationOutcomeView {
+            status: "rejected".to_string(),
+            promoted: false,
+            reason: Some("false-positive rate at balanced sensitivity rose".to_string()),
+            roc_auc: Some(0.8901),
+            false_positive_rate: Some(SensitivityBand {
+                low: 0.001,
+                balanced: 0.006,
+                high: 0.024,
+            }),
+            example_count: None,
+            have: None,
+            need: None,
+            adaptation: ClassifierAdaptationInfo {
+                active: false,
+                trained_at: None,
+                example_count: 0,
+                ngram_entries: 0,
+                roc_auc: None,
+                false_positive_rate: None,
+                max_logit_shift: 0.0,
+                logit_budget: cogwheel_classifier::adapt::DELTA_LOGIT_BUDGET,
+                pending_feedback: 42,
+                minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
+            },
+        };
+        let encoded = serde_json::to_string(&view).expect("encode");
+        for key in [
+            "\"rocAuc\"",
+            "\"falsePositiveRate\"",
+            "\"pendingFeedback\"",
+            "\"maxLogitShift\"",
+            "\"logitBudget\"",
+            "\"minimumFeedback\"",
+        ] {
+            assert!(encoded.contains(key), "missing {key} in {encoded}");
+        }
     }
 
     #[test]

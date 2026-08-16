@@ -129,6 +129,14 @@ impl Allowlist {
         })
     }
 
+    /// Every protected suffix.
+    ///
+    /// Exposed so [`crate::adapt`] can enumerate the safety net and assert it still holds before
+    /// promoting an adaptation, rather than trusting that it does.
+    pub fn suffixes(&self) -> &[String] {
+        &self.suffixes
+    }
+
     /// Number of protected entries.
     pub fn len(&self) -> usize {
         self.suffixes.len()

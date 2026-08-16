@@ -28,9 +28,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::adapt::Delta;
 use crate::allowlist::Allowlist;
 use crate::model::{Contribution, Model};
 use crate::settings::{ClassifierMode, ClassifierSettings, Sensitivity};
@@ -174,6 +175,11 @@ pub type VerdictHook = Arc<dyn Fn(&str, Option<&str>, &Verdict) + Send + Sync>;
 
 struct EngineInner {
     model: Model,
+    // The active adaptation delta, if one has been promoted. This is read on the *scoring* path, not
+    // the lookup path: `lookup` still only touches a shard map, so the DNS hot path pays nothing for
+    // adaptation existing. An `RwLock` is right here because the value changes at most a few times
+    // in the life of the appliance and is read once per scored domain, off the query path.
+    delta: RwLock<Option<Arc<Delta>>>,
     allowlist: Allowlist,
     config: EngineConfig,
     shards: Vec<Mutex<Shard>>,
@@ -272,6 +278,7 @@ impl ClassifierEngine {
         let (sender, receiver) = sync_channel(config.queue_depth.max(1));
         let inner = Arc::new(EngineInner {
             model,
+            delta: RwLock::new(None),
             allowlist,
             config,
             shards: (0..SHARD_COUNT).map(|_| Mutex::new(Shard::new())).collect(),
@@ -423,10 +430,55 @@ impl ClassifierEngine {
     }
 
     /// Signed feature contributions behind a host's score.
+    ///
+    /// Includes the active delta, so the explanation always decomposes the score the engine would
+    /// actually produce rather than the score the base model alone would have produced.
     pub fn explain(&self, host: &str, top_k: usize) -> Vec<Contribution> {
+        let delta = self.active_delta();
+        let delta = delta.as_deref();
         match crate::normalize::normalize(host) {
-            Ok(normalised) => self.inner.model.explain(&normalised, top_k),
-            Err(_) => self.inner.model.explain(host, top_k),
+            Ok(normalised) => self
+                .inner
+                .model
+                .explain_with_delta(&normalised, top_k, delta),
+            Err(_) => self.inner.model.explain_with_delta(host, top_k, delta),
+        }
+    }
+
+    /// The adaptation delta currently layered over the base model, if any.
+    pub fn active_delta(&self) -> Option<Arc<Delta>> {
+        self.inner
+            .delta
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Arc::clone))
+    }
+
+    /// Install or remove the adaptation delta, and discard every cached verdict.
+    ///
+    /// Clearing the cache is not optional. Verdicts are cached for six hours, so without it a
+    /// rollback would leave adapted scores in place for the rest of the day on exactly the domains
+    /// the household cared about enough to give feedback on — and "rollback restores the base" has
+    /// to mean immediately, not eventually.
+    ///
+    /// Returns `false` if the lock was poisoned, in which case nothing changed.
+    pub fn set_active_delta(&self, delta: Option<Arc<Delta>>) -> bool {
+        let Ok(mut guard) = self.inner.delta.write() else {
+            return false;
+        };
+        *guard = delta;
+        drop(guard);
+        self.clear_verdict_cache();
+        true
+    }
+
+    /// Drop every cached verdict, forcing the next sighting of each domain to be re-scored.
+    pub fn clear_verdict_cache(&self) {
+        for shard in &self.inner.shards {
+            if let Ok(mut guard) = shard.lock() {
+                guard.entries.clear();
+                guard.order.clear();
+            }
         }
     }
 
@@ -513,7 +565,15 @@ impl ClassifierEngine {
 
 impl EngineInner {
     fn score(&self, host: &str) -> Verdict {
-        let probability = self.model.probability(host);
+        // A poisoned delta lock degrades to "score with the base model", never to a panic in the
+        // scoring worker: losing the correction is a quality regression, losing the worker is a
+        // silent, permanent end to classification.
+        let delta = self
+            .delta
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Arc::clone));
+        let probability = self.model.probability_with_delta(host, delta.as_deref());
         Verdict {
             probability,
             protected: self.allowlist.is_protected(host),
@@ -1049,5 +1109,141 @@ mod tests {
         for host in ["a.com", "verylongdomainname.example.org", "x.y.z"] {
             assert!(shard_index(host) < SHARD_COUNT);
         }
+    }
+
+    /// A delta that pushes every score upward, for exercising the engine's adaptation path without
+    /// depending on what any particular training run produces.
+    fn upward_delta(bias: f32) -> Arc<Delta> {
+        Arc::new(Delta::for_test(bias, [0.0; N_DENSE], &[]))
+    }
+
+    #[test]
+    fn an_active_delta_changes_the_score_the_engine_produces() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        engine.observe("track.example.com");
+        engine.drain_for_test(&worker.receiver);
+        let base = engine
+            .lookup("track.example.com")
+            .expect("scored")
+            .probability;
+
+        assert!(engine.set_active_delta(Some(upward_delta(2.0))));
+        engine.observe("track.example.com");
+        engine.drain_for_test(&worker.receiver);
+        let adapted = engine
+            .lookup("track.example.com")
+            .expect("re-scored")
+            .probability;
+        assert!(
+            adapted > base,
+            "an upward delta should raise the score: {base} -> {adapted}"
+        );
+    }
+
+    /// Rollback has to restore the base *exactly*, not approximately, or "the base is always intact"
+    /// is not a claim anyone can rely on.
+    #[test]
+    fn rollback_restores_base_scores_exactly() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        let hosts = [
+            "track.example.com",
+            "ads.example.net",
+            "wiki.library.example",
+            "chase.com",
+        ];
+
+        let mut before = Vec::new();
+        for host in hosts {
+            engine.observe(host);
+            engine.drain_for_test(&worker.receiver);
+            before.push(engine.lookup(host).expect("scored").probability);
+        }
+
+        engine.set_active_delta(Some(upward_delta(1.25)));
+        for host in hosts {
+            engine.observe(host);
+            engine.drain_for_test(&worker.receiver);
+        }
+
+        engine.set_active_delta(None);
+        for (host, original) in hosts.iter().zip(&before) {
+            engine.observe(host);
+            engine.drain_for_test(&worker.receiver);
+            let restored = engine.lookup(host).expect("re-scored").probability;
+            assert_eq!(
+                restored, *original,
+                "{host} did not return to its exact base score after rollback"
+            );
+        }
+        assert!(engine.active_delta().is_none());
+    }
+
+    /// Installing or dropping a delta must not leave pre-adaptation verdicts in the cache; a stale
+    /// verdict would keep enforcing the old opinion for the rest of its six-hour TTL.
+    #[test]
+    fn changing_the_delta_invalidates_cached_verdicts() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        engine.observe("ads.example.com");
+        engine.drain_for_test(&worker.receiver);
+        assert!(engine.lookup("ads.example.com").is_some());
+
+        engine.set_active_delta(Some(upward_delta(0.5)));
+        assert_eq!(
+            engine.lookup("ads.example.com"),
+            None,
+            "the pre-adaptation verdict survived the delta being installed"
+        );
+        assert_eq!(engine.stats().cached_entries, 0);
+    }
+
+    /// The safety net must be unreachable from adaptation: a delta spending its whole budget on
+    /// pushing scores up still cannot get a protected domain blocked.
+    #[test]
+    fn a_delta_cannot_get_a_protected_domain_blocked() {
+        let (engine, worker) = engine(ClassifierMode::Protect);
+        engine.set_active_delta(Some(upward_delta(crate::adapt::DELTA_LOGIT_BUDGET)));
+        for host in ["ads.apple.com", "track.chase.com", "pixel.letsencrypt.org"] {
+            engine.observe(host);
+            engine.drain_for_test(&worker.receiver);
+            let verdict = engine.lookup(host).expect("scored");
+            assert!(
+                verdict.protected,
+                "{host} lost its protection under a delta"
+            );
+            assert_eq!(
+                engine.decide(host),
+                Decision::Allow,
+                "{host} was blocked despite being protected"
+            );
+        }
+    }
+
+    /// An adapted score explained by the base weights alone would attribute it to weights that did
+    /// not produce it, which is exactly the kind of plausible-but-false answer this crate exists to
+    /// avoid.
+    #[test]
+    fn explanations_reflect_the_active_delta() {
+        let (engine, _worker) = engine(ClassifierMode::Monitor);
+        let ad_token_contribution = |contributions: &[Contribution]| {
+            contributions
+                .iter()
+                .find(|c| c.label == "ad-tech tokens in hostname")
+                .map(|c| c.value)
+        };
+
+        let base = ad_token_contribution(&engine.explain("ads.example.com", 24))
+            .expect("the ad-token feature should fire");
+
+        let mut dense = [0.0f32; N_DENSE];
+        dense[7] = -20.0; // halve the ad-token weight the test model carries
+        engine.set_active_delta(Some(Arc::new(Delta::for_test(0.0, dense, &[]))));
+
+        let adapted = ad_token_contribution(&engine.explain("ads.example.com", 24))
+            .expect("the feature should still be reported");
+        assert!(
+            adapted < base,
+            "the explanation ignored the delta: {base} -> {adapted}"
+        );
+        assert!(engine.active_delta().is_some());
     }
 }

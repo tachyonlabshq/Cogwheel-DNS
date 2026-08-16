@@ -39,11 +39,20 @@
 //! | [`allowlist`] | Domains the classifier may never block |
 //! | [`engine`] | Verdict cache, bounded queue, background scorer |
 //! | [`settings`] | The two user-facing knobs |
+//! | [`adapt`] | Bounded on-device correction, and the gate that decides whether to keep it |
 //! | `train` | Corpus loading, SGD, calibration, evaluation (feature `training`) |
+//!
+//! # Adaptation
+//!
+//! [`adapt`] lets a household correct the model without retraining it and without any way to make
+//! it worse: the shipped weights are never rewritten, the correction is a bounded sparse vector
+//! layered on top, and it is only kept if it measurably does not regress the committed holdout.
+//! Rollback is deleting the correction.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod adapt;
 pub mod allowlist;
 pub mod engine;
 pub mod features;
@@ -54,6 +63,10 @@ pub mod settings;
 #[cfg(feature = "training")]
 pub mod train;
 
+pub use adapt::{
+    AdaptConfig, AdaptationOutcome, Delta, DeltaError, Feedback, embedded_holdout,
+    evaluate_and_gate, train_delta,
+};
 pub use allowlist::Allowlist;
 pub use engine::{
     ClassifierEngine, Decision, Detection, EngineConfig, EngineStats, ObserveOutcome,
