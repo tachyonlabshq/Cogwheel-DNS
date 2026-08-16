@@ -140,12 +140,20 @@ This builds the server and the web app from source (slow on a Pi — expect
 the port-53 conflict, and installs
 [`deploy/cogwheel.service`](deploy/cogwheel.service).
 
-To skip the build and use a published release artifact instead:
+To skip the build and use a published release artifact instead — this is the
+whole thing, copy-pasteable, and it works out the current version for you:
 
 ```sh
-curl -fsSLO https://github.com/thekozugroup/Cogwheel-DNS/releases/latest/download/cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
-sudo ./scripts/install-native.sh --tarball cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
+VERSION=$(curl -fsSL https://api.github.com/repos/thekozugroup/Cogwheel-DNS/releases/latest |
+          sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+TARBALL="cogwheel-${VERSION}-$(uname -m)-unknown-linux-gnu.tar.gz"
+curl -fsSLO "https://github.com/thekozugroup/Cogwheel-DNS/releases/download/v${VERSION}/${TARBALL}"
+sudo ./scripts/install-native.sh --tarball "${TARBALL}"
 ```
+
+`uname -m` reports `aarch64` on 64-bit Raspberry Pi OS and `x86_64` on a PC,
+which are exactly the two names used in the asset filenames. If it prints
+`armv7l` you are on a 32-bit OS and there is no build for it — see §2.
 
 What gets installed:
 
