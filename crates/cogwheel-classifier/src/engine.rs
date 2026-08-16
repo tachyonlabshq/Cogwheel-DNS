@@ -116,6 +116,8 @@ pub struct EngineStats {
     pub protected_overrides: u64,
     /// Verdicts currently resident.
     pub cached_entries: u64,
+    /// Times a verdict hook panicked and was contained.
+    pub hook_panics: u64,
 }
 
 #[derive(Debug)]
@@ -141,6 +143,7 @@ struct Counters {
     dropped: AtomicU64,
     blocked: AtomicU64,
     protected_overrides: AtomicU64,
+    hook_panics: AtomicU64,
 }
 
 /// A queued scoring request: the hostname plus whichever client asked for it.
@@ -454,6 +457,7 @@ impl ClassifierEngine {
             dropped: counters.dropped.load(Ordering::Relaxed),
             blocked: counters.blocked.load(Ordering::Relaxed),
             protected_overrides: counters.protected_overrides.load(Ordering::Relaxed),
+            hook_panics: counters.hook_panics.load(Ordering::Relaxed),
             cached_entries,
         }
     }
@@ -505,10 +509,19 @@ impl EngineInner {
             }
         }
 
+        // The hook runs arbitrary caller code on the scoring thread. If it panics, this thread
+        // dies and scoring stops permanently -- and nothing else fails, so the appliance looks
+        // healthy while quietly classifying nothing. That exact failure happened once (an observer
+        // called `tokio::spawn` from this non-runtime thread), so the boundary is now sealed.
         if let Ok(guard) = self.on_verdict.lock()
             && let Some(hook) = guard.as_ref()
         {
-            hook(host, client, &verdict);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hook(host, client, &verdict);
+            }));
+            if outcome.is_err() {
+                self.counters.hook_panics.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         self.insert(host, verdict);
@@ -790,6 +803,39 @@ mod tests {
         }
         assert_eq!(worker.run_batch(3), 3);
         assert_eq!(worker.run_batch(10), 2);
+    }
+
+    /// A verdict hook that panics must not stop scoring.
+    ///
+    /// Regression guard: an observer once called `tokio::spawn` from this non-runtime thread, which
+    /// panicked and killed the worker permanently. DNS kept working, so the appliance looked
+    /// healthy while silently classifying nothing ever again.
+    #[test]
+    #[allow(clippy::panic, reason = "the panic is the subject of this test")]
+    fn a_panicking_verdict_hook_does_not_stop_scoring() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        engine.set_verdict_hook(Arc::new(|_host, _client, _verdict| {
+            panic!("observer blew up");
+        }));
+
+        engine.observe("ads.example.com");
+        engine.drain_for_test(&worker.receiver);
+        assert!(
+            engine.lookup("ads.example.com").is_some(),
+            "the verdict must still be cached after the hook panicked"
+        );
+
+        // And scoring must continue for subsequent domains.
+        engine.observe("ads.other-example.com");
+        engine.drain_for_test(&worker.receiver);
+        assert!(engine.lookup("ads.other-example.com").is_some());
+
+        let stats = engine.stats();
+        assert_eq!(stats.scored, 2);
+        assert_eq!(
+            stats.hook_panics, 2,
+            "contained panics should be counted, not hidden"
+        );
     }
 
     #[test]

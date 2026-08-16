@@ -22,6 +22,7 @@ use cogwheel_storage::{
     AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, NotificationDeliveryRecord,
     RulesetRecord, SecurityEventRecord, SourceRecord, Storage, SyncEnvelope,
 };
+use futures::StreamExt;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
     NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts,
@@ -55,6 +56,7 @@ struct ServerState {
     threat_intel_settings: Arc<RwLock<ThreatIntelSettings>>,
     federated_learning_settings: Arc<RwLock<FederatedLearningSettings>>,
     recent_dns_activity: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
+    events: EventBus,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
@@ -632,7 +634,13 @@ async fn main() -> Result<()> {
     let classifier_engine = Arc::new(classifier_engine);
     std::thread::Builder::new()
         .name("cogwheel-classifier".to_string())
-        .spawn(move || scoring_worker.run())
+        .spawn(move || {
+            scoring_worker.run();
+            // `run` only returns when every engine handle is dropped, i.e. at shutdown. Reaching
+            // here at any other time means scoring has silently stopped, which is invisible from
+            // the outside because DNS keeps working -- so say so loudly.
+            tracing::warn!("classifier scoring worker exited; domains will no longer be scored");
+        })
         .context("spawn classifier scoring worker")?;
 
     let dns_runtime = Arc::new(DnsRuntime::new(
@@ -641,15 +649,37 @@ async fn main() -> Result<()> {
         Arc::clone(&classifier_engine),
     ));
     dns_runtime.install_classifier_bridge();
+    let events = EventBus::new();
+
+    // The classifier's scoring worker runs on a plain OS thread, deliberately: scoring is CPU-bound
+    // and must not compete with the DNS listeners for executor time. That thread has no tokio
+    // runtime context, so `tokio::spawn` inside this observer would panic and permanently kill the
+    // worker on the very first domain that scores high enough to be reported. Capture an explicit
+    // handle here, while we are still on the runtime, and spawn through it instead.
+    let runtime_handle = tokio::runtime::Handle::current();
+
     dns_runtime.set_classification_observer(Arc::new({
         let storage = storage.clone();
         let http_client = http_client.clone();
         let notification_settings = notification_settings.clone();
-        move |event| {
+        let events = events.clone();
+        let runtime_handle = runtime_handle.clone();
+        move |event: cogwheel_dns_core::ClassificationEvent| {
+            events.publish(StreamEvent::Detection(Box::new(StreamDetectionEvent {
+                domain: event.domain.clone(),
+                client: event
+                    .client_ip
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                device_name: None,
+                probability: event.score,
+                decision: if event.blocked { "block" } else { "allow" }.to_string(),
+                observed_at: event.observed_at.to_rfc3339(),
+            })));
             let storage = storage.clone();
             let http_client = http_client.clone();
             let notification_settings = notification_settings.clone();
-            tokio::spawn(async move {
+            runtime_handle.spawn(async move {
                 if let Err(error) = record_security_event_from_classification(
                     storage,
                     http_client,
@@ -665,7 +695,21 @@ async fn main() -> Result<()> {
     }));
     dns_runtime.set_query_activity_observer(Arc::new({
         let recent_dns_activity = recent_dns_activity.clone();
-        move |event| record_recent_dns_activity(&recent_dns_activity, event)
+        let events = events.clone();
+        move |event: cogwheel_dns_core::QueryActivityEvent| {
+            events.publish(StreamEvent::Query(Box::new(StreamQueryEvent {
+                domain: event.domain.clone(),
+                client: event
+                    .client_ip
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                device_name: None,
+                blocked: event.blocked,
+                reason: None,
+                observed_at: event.observed_at.to_rfc3339(),
+            })));
+            record_recent_dns_activity(&recent_dns_activity, event)
+        }
     }));
 
     let dns_handle = tokio::spawn({
@@ -686,6 +730,7 @@ async fn main() -> Result<()> {
         threat_intel_settings: Arc::new(RwLock::new(default_threat_intel_settings())),
         federated_learning_settings: Arc::new(RwLock::new(default_federated_learning_settings())),
         recent_dns_activity,
+        events,
         protected_domains,
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
@@ -868,6 +913,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
         .route("/api/v1/services/toggles", post(update_service_toggle))
+        .route("/api/v1/events/stream", get(events_stream))
         .route("/api/v1/classifier", get(classifier_status))
         .route(
             "/api/v1/classifier/settings",
@@ -5919,6 +5965,7 @@ struct ClassifierEngineStats {
     dropped: u64,
     blocked: u64,
     protected_overrides: u64,
+    hook_panics: u64,
     cached_entries: u64,
 }
 
@@ -5971,6 +6018,7 @@ fn build_classifier_status(state: &ServerState) -> ClassifierStatusResponse {
             dropped: stats.dropped,
             blocked: stats.blocked,
             protected_overrides: stats.protected_overrides,
+            hook_panics: stats.hook_panics,
             cached_entries: stats.cached_entries,
         },
         active_threshold: engine.active_threshold(),
@@ -6831,4 +6879,143 @@ mod tests {
         assert!(parsed.exit_node_enabled);
         assert_eq!(parsed.hostname, "test-node");
     }
+}
+
+// ---------------------------------------------------------------- live event stream
+
+/// Upper bound on simultaneous SSE subscribers.
+///
+/// Each connection holds a broadcast receiver and a task. A household needs one or two; the cap
+/// exists so a misbehaving client cannot open thousands and exhaust the appliance's memory.
+const MAX_EVENT_SUBSCRIBERS: usize = 32;
+
+/// Buffered events per subscriber before the slowest one starts missing frames.
+///
+/// A slow reader lags rather than applying backpressure to the DNS path — losing display frames is
+/// always preferable to slowing resolution.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// A frame pushed to connected control planes.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamQueryEvent {
+    domain: String,
+    client: String,
+    device_name: Option<String>,
+    blocked: bool,
+    reason: Option<String>,
+    observed_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamDetectionEvent {
+    domain: String,
+    client: String,
+    device_name: Option<String>,
+    probability: f32,
+    decision: String,
+    observed_at: String,
+}
+
+/// Which SSE event name a frame is published under.
+#[derive(Debug, Clone)]
+enum StreamEvent {
+    Query(Box<StreamQueryEvent>),
+    Detection(Box<StreamDetectionEvent>),
+}
+
+/// Fan-out for live events, with a bounded subscriber count.
+#[derive(Clone)]
+struct EventBus {
+    sender: tokio::sync::broadcast::Sender<StreamEvent>,
+    subscribers: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl std::fmt::Debug for EventBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventBus")
+            .field(
+                "subscribers",
+                &self.subscribers.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl EventBus {
+    fn new() -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        Self {
+            sender,
+            subscribers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Publish a frame. Never blocks and never fails: with no subscribers the send is a no-op.
+    fn publish(&self, event: StreamEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
+/// A subscriber slot that decrements the connection count when the stream is dropped.
+///
+/// Teardown has to be tied to the guard rather than the handler body, because an SSE handler
+/// returns as soon as the stream is constructed — the client may stay connected for hours after.
+struct SubscriberGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for SubscriberGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Live query and detection stream.
+///
+/// Returns 503 once [`MAX_EVENT_SUBSCRIBERS`] connections are open rather than accepting unbounded
+/// clients.
+async fn events_stream(
+    State(state): State<ServerState>,
+) -> Result<
+    axum::response::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    axum::http::StatusCode,
+> {
+    let subscribers = Arc::clone(&state.events.subscribers);
+    let previous = subscribers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if previous >= MAX_EVENT_SUBSCRIBERS {
+        subscribers.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let guard = SubscriberGuard(subscribers);
+
+    // `BroadcastStream` gives us the receiver as a Stream without pulling in a generator macro.
+    // The guard is moved into the closure so the subscriber count drops when the client
+    // disconnects and the stream is dropped -- an SSE handler returns as soon as the stream is
+    // constructed, so teardown cannot live in the handler body.
+    let stream = tokio_stream::wrappers::BroadcastStream::new(state.events.sender.subscribe())
+        .filter_map(move |item| {
+            let _guard = &guard;
+            let frame = match item {
+                Ok(StreamEvent::Query(event)) => axum::response::sse::Event::default()
+                    .event("query")
+                    .json_data(&*event),
+                Ok(StreamEvent::Detection(event)) => axum::response::sse::Event::default()
+                    .event("detection")
+                    .json_data(&*event),
+                // A slow reader missed frames. Skip them and keep the connection alive rather than
+                // tearing down a working stream over dropped display rows.
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => {
+                    return std::future::ready(None);
+                }
+            };
+            std::future::ready(frame.ok().map(Ok))
+        });
+
+    Ok(axum::response::Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
