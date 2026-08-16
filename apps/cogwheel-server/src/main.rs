@@ -37,6 +37,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -775,6 +776,29 @@ async fn main() -> Result<()> {
         }
     }
     sync_runtime_device_policies(&app_state).await?;
+    // Publish runtime health to connected control planes on a slow cadence. Without this the
+    // client's `health` listener was dead code: it subscribed to an event the server never emitted,
+    // so the Activity screen could never show that the resolver had degraded.
+    tokio::spawn({
+        let state = app_state.clone();
+        let events = state.events.clone();
+        async move {
+            let mut ticker = interval(Duration::from_secs(30));
+            loop {
+                ticker.tick().await;
+                let (degraded, notes) = match active_runtime_health_check(&state).await {
+                    Ok(health) => (health.degraded, health.notes),
+                    Err(error) => (true, vec![format!("health check failed: {error}")]),
+                };
+                events.publish(StreamEvent::Health(Box::new(StreamHealthEvent {
+                    degraded,
+                    notes,
+                    observed_at: chrono::Utc::now().to_rfc3339(),
+                })));
+            }
+        }
+    });
+
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
         let refresh_every = config.updater.refresh_interval_secs.max(30);
@@ -956,7 +980,13 @@ fn build_http_app(app_state: ServerState) -> Router {
         api_app
     };
 
-    app.with_state(app_state).layer(TraceLayer::new_for_http())
+    app.with_state(app_state)
+        // The control plane is served to phones over a LAN. The JS and CSS bundles compress by
+        // roughly 4x, so serving them raw wastes about half a megabyte on every cold load for no
+        // reason. Compression is applied to the whole router rather than just the static files so
+        // large JSON responses (query logs, audit events) benefit too.
+        .layer(CompressionLayer::new().br(true).gzip(true))
+        .layer(TraceLayer::new_for_http())
 }
 
 fn resolve_web_dist_dir() -> Option<PathBuf> {
@@ -6356,6 +6386,86 @@ mod tests {
         assert!(report.notes.is_empty());
     }
 
+    /// The subscriber cap and the Drop-based slot release are the event bus's two
+    /// correctness-critical behaviours. Without a test, a refactor that dropped `SubscriberGuard`
+    /// or moved the `fetch_add` would leak slots until the endpoint refused every client, and
+    /// nothing in the suite would notice.
+    #[test]
+    fn event_bus_releases_subscriber_slots_when_streams_are_dropped() {
+        let bus = EventBus::new();
+        let counter = Arc::clone(&bus.subscribers);
+
+        {
+            let _guards: Vec<SubscriberGuard> = (0..MAX_EVENT_SUBSCRIBERS)
+                .map(|_| {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    SubscriberGuard(Arc::clone(&counter))
+                })
+                .collect();
+            assert_eq!(
+                counter.load(std::sync::atomic::Ordering::Relaxed),
+                MAX_EVENT_SUBSCRIBERS,
+                "every slot should be taken"
+            );
+        }
+
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "dropping the guards must return every slot"
+        );
+    }
+
+    #[test]
+    fn event_bus_publishes_without_subscribers() {
+        // A send with no receivers must be a no-op, not an error path the DNS observers have to
+        // handle on every query.
+        let bus = EventBus::new();
+        bus.publish(StreamEvent::Query(Box::new(StreamQueryEvent {
+            domain: "example.com".to_string(),
+            client: "127.0.0.1".to_string(),
+            device_name: None,
+            blocked: false,
+            reason: None,
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+        })));
+        assert_eq!(
+            bus.subscribers.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn event_bus_delivers_each_frame_kind_to_a_subscriber() {
+        let bus = EventBus::new();
+        let mut receiver = bus.sender.subscribe();
+
+        bus.publish(StreamEvent::Detection(Box::new(StreamDetectionEvent {
+            domain: "ads.example.com".to_string(),
+            client: "127.0.0.1".to_string(),
+            device_name: None,
+            probability: 0.97,
+            decision: "block".to_string(),
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+        })));
+        bus.publish(StreamEvent::Health(Box::new(StreamHealthEvent {
+            degraded: true,
+            notes: vec!["upstream slow".to_string()],
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+        })));
+
+        let first = receiver.try_recv();
+        assert!(
+            matches!(&first, Ok(StreamEvent::Detection(event)) if event.domain == "ads.example.com"),
+            "expected a detection frame for ads.example.com, got {first:?}"
+        );
+        let second = receiver.try_recv();
+        assert!(
+            matches!(&second, Ok(StreamEvent::Health(event)) if event.degraded),
+            "expected a degraded health frame, got {second:?}"
+        );
+    }
+
     #[test]
     fn classifier_settings_round_trip_json() {
         let settings = ClassifierSettings {
@@ -7040,11 +7150,20 @@ struct StreamDetectionEvent {
     observed_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamHealthEvent {
+    degraded: bool,
+    notes: Vec<String>,
+    observed_at: String,
+}
+
 /// Which SSE event name a frame is published under.
 #[derive(Debug, Clone)]
 enum StreamEvent {
     Query(Box<StreamQueryEvent>),
     Detection(Box<StreamDetectionEvent>),
+    Health(Box<StreamHealthEvent>),
 }
 
 /// Fan-out for live events, with a bounded subscriber count.
@@ -7125,6 +7244,9 @@ async fn events_stream(
                     .json_data(&*event),
                 Ok(StreamEvent::Detection(event)) => axum::response::sse::Event::default()
                     .event("detection")
+                    .json_data(&*event),
+                Ok(StreamEvent::Health(event)) => axum::response::sse::Event::default()
+                    .event("health")
                     .json_data(&*event),
                 // A slow reader missed frames. Skip them and keep the connection alive rather than
                 // tearing down a working stream over dropped display rows.

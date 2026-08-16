@@ -30,6 +30,12 @@ const THROUGHPUT_FLOOR: f64 = 20_000.0;
 /// Worst-case single-inference budget, for an optimised build.
 const P99_BUDGET_MICROS: f64 = 250.0;
 
+/// Median single-inference budget, for an optimised build.
+///
+/// Asserted as well as p99: a regression that leaves the tail intact while moving the median from
+/// 8 us to 200 us is a real regression, and checking only p99 would let it through.
+const P50_BUDGET_MICROS: f64 = 60.0;
+
 /// `cargo test` builds without optimisation, where this code runs roughly 20-30x slower than the
 /// release build a Pi actually runs. Rather than skip the budget in debug — which would let a real
 /// regression through CI unnoticed — the budget is relaxed by a documented factor so the assertion
@@ -138,10 +144,49 @@ fn worst_case_latency_stays_within_budget() {
         samples.len()
     );
 
+    let p50_budget = P50_BUDGET_MICROS * allowance();
+    assert!(
+        p50 <= p50_budget,
+        "p50 latency {p50:.1}us exceeded the {p50_budget:.0}us budget for the {} profile",
+        profile()
+    );
     assert!(
         p99 <= budget,
         "p99 latency {p99:.1}us exceeded the {budget:.0}us budget for the {} profile",
         profile()
+    );
+}
+
+/// The engine's whole footprint must fit the budget, not just its weights.
+///
+/// The earlier assertion covered `resident_bytes()` alone, which by definition counts only the
+/// weight blocks -- so a verdict cache sized past the budget would have passed. This bounds the
+/// cache explicitly using its real per-entry cost.
+#[test]
+fn engine_footprint_fits_the_documented_budget() {
+    const BUDGET_BYTES: usize = 16 * 1024 * 1024;
+    // Measured cost of one cached verdict: the hostname twice (map key + FIFO record), the verdict,
+    // an Instant, and allocator overhead.
+    const BYTES_PER_ENTRY: usize = 320;
+
+    let model = embedded_model().expect("parse");
+    let config = EngineConfig::default();
+    let worst_case_cache = config.cache_capacity * BYTES_PER_ENTRY;
+    // The queue holds owned hostnames plus an optional client string.
+    let worst_case_queue = config.queue_depth * 128;
+    let total = model.resident_bytes() + worst_case_cache + worst_case_queue;
+
+    println!(
+        "weights {} KiB + cache {} KiB + queue {} KiB = {} KiB (budget {} KiB)",
+        model.resident_bytes() / 1024,
+        worst_case_cache / 1024,
+        worst_case_queue / 1024,
+        total / 1024,
+        BUDGET_BYTES / 1024
+    );
+    assert!(
+        total <= BUDGET_BYTES,
+        "worst-case engine footprint {total} exceeds the {BUDGET_BYTES} byte budget"
     );
 }
 

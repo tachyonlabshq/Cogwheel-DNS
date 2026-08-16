@@ -1,6 +1,46 @@
 # 05 — Live Ad/Tracker Domain Classifier: Engineering Spec
 
-Status: **prescriptive**. This document specifies what to build. It replaces the toy scorer in
+> ## ⚠️ SUPERSEDED — this document is a design proposal, not a description of the code
+>
+> This spec was written before implementation and prescribes a **more elaborate model than the one
+> that shipped**. It is kept for its analysis and its rationale, but **every number below that
+> describes the model is wrong for the built system.** Read this box, then treat the rest as
+> historical.
+>
+> ### What actually shipped
+>
+> | | This document proposes | **As built** |
+> | --- | --- | --- |
+> | Model | embedding bag (`d=8`) + 4-way category head | **plain linear model**, single binary output |
+> | n-gram buckets | `2^19 = 524_288` | **`2^20 = 1_048_576`** |
+> | Model file | `4_740_000 B ≈ 4.52 MiB` | **`1_048_744 B` = 1.00 MiB** |
+> | Resident (weights) | ≈ 8.65 MiB | **1.00 MiB** |
+> | Quantisation | per-row scale via a 256-entry log codebook | **one symmetric scale for the n-gram block**; dense weights stay f32 |
+> | Integrity | SHA-256 seal | magic + version + geometry validation, no hash seal |
+> | Category head | 4-way UI labels | **not built** |
+> | On-device adaptation | nightly delta training with FPR-gated promotion | **not built** |
+> | Feedback / adapt / model endpoints | `POST /classifier/feedback`, `POST /classifier/adapt/rollback`, `GET /classifier/model` | **not built** — the shipped surface is `GET /classifier`, `POST /classifier/settings`, `POST /classifier/inspect`, `GET /classifier/detections` |
+>
+> The simpler linear model was chosen after measurement: it reaches ROC-AUC 0.891 held out, its
+> per-feature contribution is *exactly* `w·x` (so explanations are arithmetic rather than
+> attribution heuristics), and it fits in 1 MiB. The extra machinery above was not justified by any
+> measured gain.
+>
+> ### Measured, as built
+>
+> Held-out test set of 245,489 domains, split by registrable domain:
+> ROC-AUC **0.891**, PR-AUC **0.662**. Thresholds calibrated on validation to target FPR, realised
+> on test: **0.099% / 0.539% / 2.317%** FPR at **17.6% / 33.7% / 50.2%** recall.
+> Throughput **140,000 domains/sec/core** on x86 release (p50 8.0 µs, p99 48.5 µs); hot-path verdict
+> lookup **38 ns**. int8 quantisation costs 0.00005 ROC-AUC.
+>
+> No Raspberry Pi 5 measurement is claimed anywhere — only the x86 figures above and a documented
+> derivation. The source of truth for behaviour is the code and its tests in
+> `crates/cogwheel-classifier/`, not this document.
+
+---
+
+Status: **superseded proposal**. This document specified what to build. It replaces the toy scorer in
 `/home/user/Cogwheel-DNS/crates/cogwheel-classifier/src/lib.rs` (99 lines,
 `score = entropy/5 + digit_ratio + hyphen_ratio`) with a trained, calibrated, quantized,
 explainable classifier that runs inside a Raspberry Pi 5's budget.
