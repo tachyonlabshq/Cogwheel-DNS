@@ -733,7 +733,21 @@ start_container() {
             --publish "$HTTP_PORT:8080/tcp"
     fi
 
-    docker run "$@" "$IMAGE" >/dev/null
+    # `docker run` can be refused by the daemon rather than by Cogwheel -- an
+    # unavailable ulimit, a cgroup the host does not support, a name clash, a
+    # seccomp/apparmor denial. Under `set -e` an unchecked failure here killed
+    # the installer outright: no explanation, and no rollback, even though the
+    # port-53 fix had ALREADY edited this host's resolver configuration. That
+    # left a box with a rewritten /etc/resolv.conf, no Cogwheel, and a bare
+    # exit code. Return instead, so do_install can roll the host back.
+    #
+    # `2>&1 >/dev/null` in that order: stderr to the capture, stdout to the
+    # bin. The reverse would capture the container id and discard the error.
+    if ! _run_err=$(docker run "$@" "$IMAGE" 2>&1 >/dev/null); then
+        err "the Docker daemon refused to start the container:"
+        printf '%s\n' "$_run_err" | sed 's/^/       /' >&2
+        return 1
+    fi
     step "Started container '$CONTAINER_NAME'"
 }
 
@@ -815,9 +829,17 @@ probe_dns() {
 rollback() {
     err "Install failed -- rolling back"
 
-    printf '\n%s---- last 40 log lines from %s ----%s\n' "$C_BOLD" "$CONTAINER_NAME" "$C_RESET" >&2
-    docker logs --tail 40 "$CONTAINER_NAME" 2>&1 | sed 's/^/    /' >&2 || true
-    printf '\n' >&2
+    # Only when there is a container to read. If the daemon refused to create
+    # one, `docker logs` prints "No such container" -- and printing that under a
+    # "last 40 log lines" heading reads as though Cogwheel started and then
+    # vanished, sending the operator looking in the wrong place entirely.
+    if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+        printf '\n%s---- last 40 log lines from %s ----%s\n' "$C_BOLD" "$CONTAINER_NAME" "$C_RESET" >&2
+        docker logs --tail 40 "$CONTAINER_NAME" 2>&1 | sed 's/^/    /' >&2 || true
+        printf '\n' >&2
+    else
+        printf '\n%sThe container was never created, so there are no logs.%s\n\n' "$C_BOLD" "$C_RESET" >&2
+    fi
 
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
@@ -935,7 +957,9 @@ do_install() {
         return 0
     fi
 
-    start_container
+    if ! start_container; then
+        rollback
+    fi
 
     if ! wait_for_health; then
         rollback
