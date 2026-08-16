@@ -39,6 +39,39 @@ pub enum StorageError {
     Internal(String),
 }
 
+/// Lock the SQLite connection.
+///
+/// Every public method funnels through here. A poisoned mutex means another thread panicked while
+/// holding the connection; returning an error lets the caller surface a failed request instead of
+/// cascading that one panic through every subsequent database call for the life of the process.
+fn lock_connection(
+    connection: &Mutex<Connection>,
+) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
+    connection
+        .lock()
+        .map_err(|_| StorageError::Internal("storage connection lock poisoned".to_string()))
+}
+
+/// Decode a UUID stored as text in a result row.
+///
+/// A malformed id means the database is damaged — an appliance's SQLite file can be truncated by a
+/// power cut mid-write. That should fail the query it appears in, not abort the process, so this
+/// converts the parse failure into a row-level conversion error the caller can propagate.
+fn row_uuid(column: usize, value: &str) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+/// Decode an optional UUID column, preserving `NULL` as `None`.
+fn row_uuid_opt(column: usize, value: Option<&str>) -> rusqlite::Result<Option<Uuid>> {
+    value.map(|raw| row_uuid(column, raw)).transpose()
+}
+
 #[derive(Debug, Clone)]
 pub struct Storage {
     connection: Arc<Mutex<Connection>>,
@@ -251,7 +284,7 @@ impl Storage {
     }
 
     pub async fn upsert_setting(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
@@ -261,7 +294,7 @@ impl Storage {
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1 LIMIT 1",
@@ -273,7 +306,7 @@ impl Storage {
     }
 
     pub async fn insert_source(&self, source: &SourceRecord) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT OR REPLACE INTO sources (id, name, url, kind, enabled, refresh_interval_minutes, profile, verification_strictness, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -292,13 +325,13 @@ impl Storage {
     }
 
     pub async fn list_sources(&self) -> Result<Vec<SourceRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, name, url, kind, enabled, refresh_interval_minutes, profile, verification_strictness FROM sources ORDER BY name ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(SourceRecord {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                id: row_uuid(0, &row.get::<_, String>(0)?)?,
                 name: row.get(1)?,
                 url: row.get(2)?,
                 kind: row.get(3)?,
@@ -314,7 +347,7 @@ impl Storage {
     }
 
     pub async fn delete_source(&self, source_id: Uuid) -> Result<bool, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let changed = connection.execute(
             "DELETE FROM sources WHERE id = ?1",
             params![source_id.to_string()],
@@ -323,7 +356,7 @@ impl Storage {
     }
 
     pub async fn upsert_device(&self, device: &DeviceRecord) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -342,7 +375,7 @@ impl Storage {
     }
 
     pub async fn delete_device(&self, device_id: Uuid) -> Result<bool, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let changed = connection.execute(
             "DELETE FROM devices WHERE id = ?1",
             params![device_id.to_string()],
@@ -351,13 +384,13 @@ impl Storage {
     }
 
     pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json FROM devices ORDER BY name ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(DeviceRecord {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                id: row_uuid(0, &row.get::<_, String>(0)?)?,
                 name: row.get(1)?,
                 ip_address: row.get(2)?,
                 policy_mode: row.get(3)?,
@@ -378,7 +411,7 @@ impl Storage {
         &self,
         ip_address: &str,
     ) -> Result<Option<DeviceRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json FROM devices WHERE ip_address = ?1",
         )?;
@@ -386,7 +419,7 @@ impl Storage {
         statement
             .query_row(params![ip_address], |row| {
                 Ok(DeviceRecord {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                    id: row_uuid(0, &row.get::<_, String>(0)?)?,
                     name: row.get(1)?,
                     ip_address: row.get(2)?,
                     policy_mode: row.get(3)?,
@@ -406,7 +439,7 @@ impl Storage {
         &self,
         event: &SecurityEventRecord,
     ) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT INTO security_events (id, device_id, device_name, client_ip, domain, classifier_score, severity, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -428,19 +461,15 @@ impl Storage {
         &self,
         limit: i64,
     ) -> Result<Vec<SecurityEventRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, device_id, device_name, client_ip, domain, classifier_score, severity, created_at FROM security_events ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit], |row| {
             let device_id = row.get::<_, Option<String>>(1)?;
             Ok(SecurityEventRecord {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
-                device_id: device_id
-                    .as_deref()
-                    .map(Uuid::parse_str)
-                    .transpose()
-                    .expect("valid optional uuid in database"),
+                id: row_uuid(0, &row.get::<_, String>(0)?)?,
+                device_id: row_uuid_opt(1, device_id.as_deref())?,
                 device_name: row.get(2)?,
                 client_ip: row.get(3)?,
                 domain: row.get(4)?,
@@ -455,7 +484,7 @@ impl Storage {
     }
 
     pub async fn record_ruleset(&self, ruleset: &RulesetRecord) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT INTO rulesets (id, hash, status, created_at, artifact_json) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -470,7 +499,7 @@ impl Storage {
     }
 
     pub async fn list_rulesets(&self) -> Result<Vec<RulesetRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, hash, status, created_at, artifact_json FROM rulesets ORDER BY created_at DESC",
         )?;
@@ -480,7 +509,7 @@ impl Storage {
     }
 
     pub async fn activate_ruleset(&self, ruleset_id: Uuid) -> Result<(), StorageError> {
-        let mut connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut connection = lock_connection(&self.connection)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "UPDATE rulesets SET status = 'previous' WHERE status = 'active'",
@@ -499,7 +528,7 @@ impl Storage {
     }
 
     pub async fn active_ruleset(&self) -> Result<Option<RulesetRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection
             .query_row(
                 "SELECT id, hash, status, created_at, artifact_json FROM rulesets WHERE status = 'active' LIMIT 1",
@@ -511,7 +540,7 @@ impl Storage {
     }
 
     pub async fn previous_ruleset(&self) -> Result<Option<RulesetRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection
             .query_row(
                 "SELECT id, hash, status, created_at, artifact_json FROM rulesets WHERE status = 'previous' ORDER BY created_at DESC LIMIT 1",
@@ -535,7 +564,7 @@ impl Storage {
     }
 
     pub async fn record_audit_event(&self, event: &AuditEvent) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT INTO audit_events (id, event_type, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -549,13 +578,13 @@ impl Storage {
     }
 
     pub async fn recent_audit_events(&self, limit: i64) -> Result<Vec<AuditEvent>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, event_type, payload, created_at FROM audit_events ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit], |row| {
             Ok(AuditEvent {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                id: row_uuid(0, &row.get::<_, String>(0)?)?,
                 event_type: row.get(1)?,
                 payload: row.get(2)?,
                 created_at: parse_datetime(&row.get::<_, String>(3)?).map_err(to_sqlite_error)?,
@@ -570,7 +599,7 @@ impl Storage {
         &self,
         delivery: &NotificationDeliveryRecord,
     ) -> Result<(), StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         connection.execute(
             "INSERT INTO notification_deliveries (id, event_type, status, severity, title, summary, domain, device_name, client_ip, attempts, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -595,13 +624,13 @@ impl Storage {
         &self,
         limit: i64,
     ) -> Result<Vec<NotificationDeliveryRecord>, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare(
             "SELECT id, event_type, status, severity, title, summary, domain, device_name, client_ip, attempts, created_at FROM notification_deliveries ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit], |row| {
             Ok(NotificationDeliveryRecord {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                id: row_uuid(0, &row.get::<_, String>(0)?)?,
                 event_type: row.get(1)?,
                 status: row.get(2)?,
                 severity: row.get(3)?,
@@ -620,7 +649,7 @@ impl Storage {
     }
 
     pub fn get_config_version(&self) -> Result<u32, StorageError> {
-        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let connection = lock_connection(&self.connection)?;
         let mut statement = connection.prepare("SELECT version FROM config_schema WHERE id = 1")?;
         let version: u32 = statement.query_row([], |row| row.get(0))?;
         Ok(version)
@@ -643,7 +672,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
 
 fn decode_ruleset_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RulesetRecord> {
     Ok(RulesetRecord {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+        id: row_uuid(0, &row.get::<_, String>(0)?)?,
         hash: row.get(1)?,
         status: row.get(2)?,
         created_at: parse_datetime(&row.get::<_, String>(3)?).map_err(to_sqlite_error)?,

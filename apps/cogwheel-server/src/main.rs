@@ -82,7 +82,13 @@ impl RateLimiter {
 
     fn is_allowed(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut requests = self.requests.lock().unwrap();
+        // A poisoned lock means some other thread panicked mid-update. Failing open is the right
+        // call here: rate limiting is a safeguard, and refusing every request afterwards would turn
+        // one panic into a total outage of the control plane.
+        let Ok(mut requests) = self.requests.lock() else {
+            tracing::warn!("rate limiter lock poisoned; allowing request");
+            return true;
+        };
 
         let entry = requests.entry(key.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < Duration::from_secs(self.window_secs));
@@ -750,10 +756,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Read an `RwLock`, recovering the value even when the lock is poisoned.
+///
+/// Poisoning only records that some thread panicked while holding the lock. Every field guarded
+/// this way holds a wholesale replacement, so the last committed value is still coherent, and
+/// recovering it keeps a single panicking request from disabling the control plane for the rest of
+/// the process lifetime.
+fn read_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Write to an `RwLock`, recovering the value even when the lock is poisoned. See [`read_recover`].
+fn write_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Lock a `Mutex`, recovering the value even when it is poisoned. See [`read_recover`].
+fn lock_recover<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("info".parse().expect("valid directive")),
+            EnvFilter::from_default_env()
+                .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
         )
         .json()
         .init();
@@ -1144,7 +1172,7 @@ fn record_recent_dns_activity(
     activity: &Arc<Mutex<VecDeque<DomainActivityRecord>>>,
     event: QueryActivityEvent,
 ) {
-    let mut guard = activity.lock().expect("recent dns activity lock poisoned");
+    let mut guard = lock_recover(activity);
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
     while let Some(front) = guard.front() {
         if front.observed_at >= cutoff && guard.len() < 4096 {
@@ -1161,10 +1189,7 @@ fn record_recent_dns_activity(
 
 fn build_domain_insights(state: &ServerState) -> DomainInsights {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-    let guard = state
-        .recent_dns_activity
-        .lock()
-        .expect("recent dns activity lock poisoned");
+    let guard = lock_recover(&state.recent_dns_activity);
 
     let mut queried = HashMap::<String, usize>::new();
     let mut blocked = HashMap::<String, usize>::new();
@@ -1648,11 +1673,7 @@ async fn settings_summary(
     let block_profiles = load_block_profiles(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notifications = state
-        .notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
+    let notifications = read_recover(&state.notification_settings).clone();
     let notification_test_presets = load_notification_test_presets(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2420,11 +2441,7 @@ async fn sync_status(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let replay_cache_entries = state
-        .sync_seen_nonces
-        .lock()
-        .expect("sync nonce lock poisoned")
-        .len();
+    let replay_cache_entries = lock_recover(&state.sync_seen_nonces).len();
 
     let events = state
         .storage
@@ -2517,10 +2534,7 @@ fn register_sync_nonce(state: &ServerState, envelope: &SyncEnvelope) -> bool {
     }
 
     let key = format!("{}:{}", envelope.node_public_key, envelope.nonce);
-    let mut guard = state
-        .sync_seen_nonces
-        .lock()
-        .expect("sync nonce lock poisoned");
+    let mut guard = lock_recover(&state.sync_seen_nonces);
     guard.retain(|_, ts| *ts >= (now - chrono::Duration::minutes(30)));
 
     if guard.contains_key(&key) {
@@ -2581,11 +2595,7 @@ async fn export_sync_state(
         blocklists,
         devices,
         classifier: state.dns_runtime.classifier_settings(),
-        notifications: state
-            .notification_settings
-            .read()
-            .expect("notification settings lock poisoned")
-            .clone(),
+        notifications: read_recover(&state.notification_settings).clone(),
     };
 
     let payload_bytes =
@@ -2785,11 +2795,7 @@ async fn rollback_ruleset(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let notification_settings = state
-        .notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
+    let notification_settings = read_recover(&state.notification_settings).clone();
     if should_deliver_notification(&notification_settings, "high") {
         let event = NotificationWebhookEvent {
             event_type: "ruleset.rollback".to_string(),
@@ -2873,11 +2879,7 @@ async fn backup_data(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let classifier = state.dns_runtime.classifier_settings();
-    let notifications = state
-        .notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
+    let notifications = read_recover(&state.notification_settings).clone();
 
     let backup = BackupData {
         version: "1.0".to_string(),
@@ -2908,9 +2910,10 @@ async fn restore_data(
         let _ = state.storage.upsert_device(device).await;
     }
 
-    {
-        let mut notifications = state.notification_settings.write().unwrap();
+    if let Ok(mut notifications) = state.notification_settings.write() {
         *notifications = data.notifications;
+    } else {
+        tracing::error!("notification settings lock poisoned; restore left them unchanged");
     }
 
     state
@@ -3628,10 +3631,7 @@ async fn update_notification_settings(
     persist_notification_settings(&state.storage, &settings)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    *state
-        .notification_settings
-        .write()
-        .expect("notification settings lock poisoned") = settings.clone();
+    *write_recover(&state.notification_settings) = settings.clone();
     state
         .storage
         .record_audit_event(&AuditEvent {
@@ -3651,11 +3651,7 @@ async fn test_notification_settings(
     State(state): State<ServerState>,
     Json(request): Json<TestNotificationRequest>,
 ) -> Result<Json<ApiEnvelope<NotificationTestResult>>, axum::http::StatusCode> {
-    let settings = state
-        .notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
+    let settings = read_recover(&state.notification_settings).clone();
     let Some(target) = settings.webhook_url.clone() else {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     };
@@ -4018,11 +4014,7 @@ async fn refresh_sources_once(
             })
             .await?;
 
-        let notification_settings = state
-            .notification_settings
-            .read()
-            .expect("notification settings lock poisoned")
-            .clone();
+        let notification_settings = read_recover(&state.notification_settings).clone();
         if should_deliver_notification(&notification_settings, "high") {
             let event = NotificationWebhookEvent {
                 event_type: "ruleset.refresh_rejected".to_string(),
@@ -4113,11 +4105,7 @@ async fn refresh_sources_once(
             })
             .await?;
 
-        let notification_settings = state
-            .notification_settings
-            .read()
-            .expect("notification settings lock poisoned")
-            .clone();
+        let notification_settings = read_recover(&state.notification_settings).clone();
         if should_deliver_notification(&notification_settings, "critical") {
             let event = NotificationWebhookEvent {
                 event_type: "ruleset.auto_rollback".to_string(),
@@ -4256,10 +4244,10 @@ fn default_block_profiles() -> Vec<BlockProfileRecord> {
             name: "Family".to_string(),
             description: "Covers the everyday family setup with the core OISD list plus lighter NSFW filtering."
                 .to_string(),
-            blocklists: vec![
-                preset_block_profile_list("oisd-small").unwrap(),
-                preset_block_profile_list("oisd-nsfw-small").unwrap(),
-            ],
+            blocklists: ["oisd-small", "oisd-nsfw-small"]
+                .into_iter()
+                .filter_map(preset_block_profile_list)
+                .collect(),
             allowlists: vec!["pbskids.org".to_string(), "khanacademy.org".to_string()],
             updated_at: now,
         },
@@ -4269,7 +4257,10 @@ fn default_block_profiles() -> Vec<BlockProfileRecord> {
             name: "Focus".to_string(),
             description: "A quieter setup for work or school devices with the smaller OISD core list only."
                 .to_string(),
-            blocklists: vec![preset_block_profile_list("oisd-small").unwrap()],
+            blocklists: ["oisd-small"]
+                .into_iter()
+                .filter_map(preset_block_profile_list)
+                .collect(),
             allowlists: vec!["calendar.google.com".to_string(), "notion.so".to_string()],
             updated_at: now,
         },
@@ -4765,11 +4756,7 @@ async fn active_runtime_health_check(state: &ServerState) -> Result<RuntimeHealt
         .await?;
 
     if response.degraded {
-        let notification_settings = state
-            .notification_settings
-            .read()
-            .expect("notification settings lock poisoned")
-            .clone();
+        let notification_settings = read_recover(&state.notification_settings).clone();
         if should_deliver_notification(&notification_settings, "high") {
             let event = NotificationWebhookEvent {
                 event_type: "runtime.health_degraded".to_string(),
@@ -5834,10 +5821,7 @@ async fn record_security_event_from_classification(
         created_at: event.observed_at,
     };
     storage.record_security_event(&security_event).await?;
-    let current_notification_settings = notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
+    let current_notification_settings = read_recover(&notification_settings).clone();
     if matches!(security_event.severity.as_str(), "high" | "critical") {
         storage
             .record_audit_event(&AuditEvent {
@@ -6841,8 +6825,9 @@ mod tests {
             saved_at: "2024-01-01T00:00:00Z".to_string(),
             hostname: "test-node".to_string(),
         };
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: TailscaleSavedState = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&state).expect("encode tailscale state");
+        let parsed: TailscaleSavedState =
+            serde_json::from_str(&json).expect("decode tailscale state");
         assert!(parsed.exit_node_enabled);
         assert_eq!(parsed.hostname, "test-node");
     }

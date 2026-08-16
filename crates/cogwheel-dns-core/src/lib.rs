@@ -122,6 +122,17 @@ pub struct DnsRuntimeSnapshot {
     pub classifier_latency_samples: u64,
 }
 
+/// Read an `RwLock`, recovering the value even when the lock is poisoned.
+///
+/// Poisoning only signals that some thread panicked while holding the lock. Every field guarded
+/// this way holds a wholesale replacement — an `Arc` swap or a rebuilt map — so the last committed
+/// value is still coherent, and recovering it keeps one panicking task from taking DNS resolution
+/// down for the remaining life of the process. Failing open is the right posture for a household
+/// resolver: losing the policy should mean "resolve normally", never "take the network offline".
+fn read_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl DnsRuntime {
     /// Build a runtime around a resolver, a policy engine and a classifier engine.
     ///
@@ -528,11 +539,7 @@ impl DnsRuntime {
     }
 
     fn emit_query_activity(&self, domain: &str, client_addr: Option<SocketAddr>, blocked: bool) {
-        let observer = self
-            .query_activity_observer
-            .read()
-            .expect("query activity observer lock poisoned")
-            .clone();
+        let observer = read_recover(&self.query_activity_observer).clone();
         if let Some(observer) = observer {
             observer(QueryActivityEvent {
                 domain: domain.to_string(),
@@ -566,24 +573,17 @@ impl DnsRuntime {
     ) -> (Arc<PolicyEngine>, String, Option<BlockMode>) {
         if let Some(until) = self.protection_paused_until() {
             if Utc::now() < until {
-                let allow_all_policy = self
-                    .allow_all_policy
-                    .read()
-                    .expect("allow-all policy lock poisoned")
-                    .clone();
+                let allow_all_policy = read_recover(&self.allow_all_policy).clone();
                 return (allow_all_policy, "global-pause".to_string(), None);
             }
         }
 
-        let global = self.policy.read().expect("policy lock poisoned").clone();
+        let global = read_recover(&self.policy).clone();
         let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
             return (global.clone(), global.artifact().hash.clone(), None);
         };
 
-        let devices = self
-            .devices_by_ip
-            .read()
-            .expect("device policy lock poisoned");
+        let devices = read_recover(&self.devices_by_ip);
         let Some(device) = devices.get(&client_ip) else {
             return (global.clone(), global.artifact().hash.clone(), None);
         };
@@ -606,11 +606,7 @@ impl DnsRuntime {
             .iter()
             .any(|candidate| domain_matches_override(domain, candidate))
         {
-            let allow_all_policy = self
-                .allow_all_policy
-                .read()
-                .expect("allow-all policy lock poisoned")
-                .clone();
+            let allow_all_policy = read_recover(&self.allow_all_policy).clone();
             return (
                 allow_all_policy,
                 format!("device-allow:{}", client_ip),
@@ -618,11 +614,7 @@ impl DnsRuntime {
             );
         }
         if device.protection_override == "bypass" {
-            let allow_all_policy = self
-                .allow_all_policy
-                .read()
-                .expect("allow-all policy lock poisoned")
-                .clone();
+            let allow_all_policy = read_recover(&self.allow_all_policy).clone();
             return (allow_all_policy, "bypass".to_string(), None);
         }
 
@@ -630,10 +622,7 @@ impl DnsRuntime {
             return (global.clone(), global.artifact().hash.clone(), None);
         };
 
-        let profile_policies = self
-            .profile_policies
-            .read()
-            .expect("profile policies lock poisoned");
+        let profile_policies = read_recover(&self.profile_policies);
         let Some(policy) = profile_policies.get(profile) else {
             return (global.clone(), global.artifact().hash.clone(), None);
         };

@@ -47,11 +47,24 @@ pub struct VerificationResult {
     pub notes: Vec<String>,
 }
 
+/// The placeholder URL carried by sources that were synthesised rather than fetched.
+///
+/// Parsed once from a string literal that is a valid data URL by inspection. Keeping it in a
+/// `LazyLock` means the single unavoidable assertion lives here rather than at every call site,
+/// and it is evaluated the first time a synthetic source is built rather than on every call.
+static SYNTHETIC_SOURCE_URL: std::sync::LazyLock<Url> = std::sync::LazyLock::new(|| {
+    #[allow(
+        clippy::expect_used,
+        reason = "the literal is a constant, valid data URL; failure is not reachable at runtime"
+    )]
+    Url::parse("data:text/plain,").expect("synthetic source URL literal is valid")
+});
+
 pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
     let source = SourceDefinition {
         id: Uuid::new_v4(),
         name: name.to_string(),
-        url: Url::parse("data:text/plain,").expect("valid synthetic url"),
+        url: SYNTHETIC_SOURCE_URL.clone(),
         kind: SourceKind::Domains,
         enabled: true,
         profile: "shared".to_string(),
@@ -305,7 +318,7 @@ mod tests {
         let source = SourceDefinition {
             id: Uuid::new_v4(),
             name: "test".to_string(),
-            url: Url::parse("https://example.com/list.txt").unwrap(),
+            url: Url::parse("https://example.com/list.txt").expect("valid test url"),
             kind: SourceKind::Adblock,
             enabled: true,
             profile: "balanced".to_string(),
@@ -320,7 +333,8 @@ mod tests {
     #[test]
     fn data_url_body_parses() {
         let body = parse_data_url(
-            &Url::parse("data:text/plain,ads.example.com%0Atracker.example.com").unwrap(),
+            &Url::parse("data:text/plain,ads.example.com%0Atracker.example.com")
+                .expect("valid data url"),
         );
         assert!(body.contains("ads.example.com"));
         assert!(body.contains("tracker.example.com"));
@@ -331,7 +345,7 @@ mod tests {
         let source = SourceDefinition {
             id: Uuid::new_v4(),
             name: "test".to_string(),
-            url: Url::parse("https://example.com/list.txt").unwrap(),
+            url: Url::parse("https://example.com/list.txt").expect("valid test url"),
             kind: SourceKind::Adblock,
             enabled: true,
             profile: "balanced".to_string(),
@@ -367,7 +381,7 @@ mod tests {
         let source = SourceDefinition {
             id: Uuid::new_v4(),
             name: "strict-source".to_string(),
-            url: Url::parse("https://example.com/list.txt").unwrap(),
+            url: Url::parse("https://example.com/list.txt").expect("valid test url"),
             kind: SourceKind::Adblock,
             enabled: true,
             profile: "strict".to_string(),

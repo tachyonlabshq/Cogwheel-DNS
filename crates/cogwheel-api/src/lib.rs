@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -41,7 +41,7 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:8080".parse().expect("valid default addr"),
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080),
         }
     }
 }
@@ -56,9 +56,9 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            http_bind_addr: "0.0.0.0:8080".parse().expect("valid default addr"),
-            dns_udp_bind_addr: "0.0.0.0:5353".parse().expect("valid default addr"),
-            dns_tcp_bind_addr: "0.0.0.0:5353".parse().expect("valid default addr"),
+            http_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080),
+            dns_udp_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353),
+            dns_tcp_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353),
         }
     }
 }
@@ -206,13 +206,11 @@ impl AppConfig {
         match profile {
             DeploymentProfile::Dev => {
                 config.server.http_bind_addr =
-                    "127.0.0.1:30080".parse().expect("valid dev http bind addr");
-                config.server.dns_udp_bind_addr = "127.0.0.1:30053"
-                    .parse()
-                    .expect("valid dev dns udp bind addr");
-                config.server.dns_tcp_bind_addr = "127.0.0.1:30053"
-                    .parse()
-                    .expect("valid dev dns tcp bind addr");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30080);
+                config.server.dns_udp_bind_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30053);
+                config.server.dns_tcp_bind_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30053);
                 config.storage.database_url = "sqlite://data/cogwheel-dev.db".to_string();
                 config.updater.refresh_interval_secs = 120;
                 config.runtime_guard.max_upstream_failures_delta = 2;
@@ -220,23 +218,21 @@ impl AppConfig {
             }
             DeploymentProfile::Home => {
                 config.server.http_bind_addr =
-                    "0.0.0.0:8080".parse().expect("valid home http bind addr");
-                config.server.dns_udp_bind_addr = "0.0.0.0:5353"
-                    .parse()
-                    .expect("valid home dns udp bind addr");
-                config.server.dns_tcp_bind_addr = "0.0.0.0:5353"
-                    .parse()
-                    .expect("valid home dns tcp bind addr");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080);
+                config.server.dns_udp_bind_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353);
+                config.server.dns_tcp_bind_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5353);
                 config.storage.database_url = "sqlite://data/cogwheel.db".to_string();
                 config.updater.refresh_interval_secs = 300;
             }
             DeploymentProfile::Smb => {
                 config.server.http_bind_addr =
-                    "0.0.0.0:8080".parse().expect("valid smb http bind addr");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080);
                 config.server.dns_udp_bind_addr =
-                    "0.0.0.0:53".parse().expect("valid smb dns udp bind addr");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 53);
                 config.server.dns_tcp_bind_addr =
-                    "0.0.0.0:53".parse().expect("valid smb dns tcp bind addr");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 53);
                 config.storage.database_url = "sqlite://data/cogwheel-smb.db".to_string();
                 config.updater.refresh_interval_secs = 600;
                 config.runtime_guard.max_upstream_failures_delta = 1;
@@ -393,7 +389,7 @@ mod tests {
 
         for (relative_path, allowed) in expected {
             let manifest = fs::read_to_string(workspace_root.join(relative_path))
-                .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
+                .unwrap_or_else(|error| unreachable!("failed to read {relative_path}: {error}"));
             let actual = path_dependencies(&manifest);
             assert_eq!(
                 actual, allowed,
