@@ -1,29 +1,22 @@
 import React from "react";
-import ReactDOM from "react-dom/client";
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
-import { Dashboard } from "@/components/dashboard/dashboard";
-import { StatusBar } from "@/components/status-bar";
-import { CogwheelProvider } from "@/contexts/cogwheel-context";
-import { ErrorBoundary } from "@/components/error-boundary";
-import { Toaster } from "@/components/ui/sonner";
-import "./index.css";
+import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import "@/index.css";
+import { App } from "@/App";
+import { CogwheelProvider } from "@/data/provider";
+import { ErrorBoundary } from "@/components/layout/error-boundary";
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const container = document.getElementById("root");
+if (!container) throw new Error("#root is missing from index.html");
+
+createRoot(container).render(
   <React.StrictMode>
     <ErrorBoundary>
-    <CogwheelProvider>
-      <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset className="flex h-screen flex-col">
-          <div className="flex-1 min-h-0">
-            <Dashboard />
-          </div>
-          <StatusBar />
-        </SidebarInset>
-      </SidebarProvider>
-      <Toaster />
-    </CogwheelProvider>
+      <BrowserRouter>
+        <CogwheelProvider>
+          <App />
+        </CogwheelProvider>
+      </BrowserRouter>
     </ErrorBoundary>
   </React.StrictMode>,
 );

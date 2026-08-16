@@ -1,114 +1,231 @@
-import * as React from "react";
-import * as SheetPrimitive from "@radix-ui/react-dialog";
-import { cva, type VariantProps } from "class-variance-authority";
-import { X } from "lucide-react";
+"use client";
+
+import { Dialog as ArkDialog, useDialogContext } from "@ark-ui/react/dialog";
+import { Portal } from "@ark-ui/react/portal";
+import { XIcon } from "lucide-react";
+import type React from "react";
+import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
-const Sheet = SheetPrimitive.Root;
-const SheetTrigger = SheetPrimitive.Trigger;
-const SheetClose = SheetPrimitive.Close;
-const SheetPortal = SheetPrimitive.Portal;
+export const useSheet = useDialogContext;
 
-const SheetOverlay = React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Overlay>
->(({ className, ...props }, ref) => (
-  <SheetPrimitive.Overlay
-    className={cn(
-      "fixed inset-0 z-50 bg-black/40 data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out",
-      className,
-    )}
-    {...props}
-    ref={ref}
-  />
-));
-SheetOverlay.displayName = SheetPrimitive.Overlay.displayName;
-
-const sheetVariants = cva(
-  "fixed z-50 gap-4 bg-card p-6 shadow-halo transition ease-in-out",
-  {
-    variants: {
-      side: {
-        top: "inset-x-0 top-0 border-b border-border data-[state=open]:animate-sheet-in-top data-[state=closed]:animate-sheet-out-top",
-        bottom:
-          "inset-x-0 bottom-0 border-t border-border data-[state=open]:animate-sheet-in-bottom data-[state=closed]:animate-sheet-out-bottom",
-        left: "inset-y-0 left-0 h-full w-3/4 border-r border-border sm:max-w-sm data-[state=open]:animate-sheet-in-left data-[state=closed]:animate-sheet-out-left",
-        right:
-          "inset-y-0 right-0 h-full w-3/4 border-l border-border sm:max-w-sm data-[state=open]:animate-sheet-in-right data-[state=closed]:animate-sheet-out-right",
-      },
-    },
-    defaultVariants: {
-      side: "right",
-    },
-  },
+export const Sheet = (props: React.ComponentProps<typeof Dialog>) => (
+  <Dialog data-slot="sheet" {...props} />
 );
 
+export const SheetTrigger = (
+  props: React.ComponentProps<typeof ArkDialog.Trigger>
+) => <ArkDialog.Trigger data-slot="sheet-trigger" {...props} />;
+
+export const SheetOverlay = (
+  props: React.ComponentProps<typeof DialogOverlay>
+) => <DialogOverlay data-slot="sheet-overlay" {...props} />;
+
+const sheetPositionerVariants = tv({
+  base: [
+    "[--inset:--spacing(0)]",
+    "fixed inset-0 z-50",
+    "h-svh w-screen",
+    "grid",
+    "overflow-hidden",
+  ],
+  variants: {
+    placement: {
+      bottom: "grid grid-rows-[1fr_auto] not-data-[variant=inset]:pt-12",
+      top: "grid grid-rows-[auto_1fr] not-data-[variant=inset]:pb-12",
+      left: "flex justify-start",
+      right: "flex justify-end",
+    },
+    variant: {
+      default: "",
+      inset: [
+        "px-(--inset) sm:[--inset:--spacing(4)]",
+        "data-[placement=bottom]:pb-(--inset)",
+        "data-[placement=top]:pt-(--inset)",
+        "data-[placement=left]:pt-(--inset) data-[placement=left]:pb-(--inset)",
+        "data-[placement=right]:pt-(--inset) data-[placement=right]:pb-(--inset)",
+      ],
+    },
+  },
+  defaultVariants: {
+    variant: "default",
+  },
+});
+
+interface SheetPositionerProps
+  extends React.ComponentProps<typeof ArkDialog.Positioner>,
+    VariantProps<typeof sheetPositionerVariants> {}
+
+export const SheetPositioner = (props: SheetPositionerProps) => {
+  const { variant = "default", placement, className, ...rest } = props;
+
+  return (
+    <ArkDialog.Positioner
+      className={cn(sheetPositionerVariants({ placement, variant }), className)}
+      data-placement={placement}
+      data-slot="sheet-positioner"
+      data-variant={variant}
+      {...rest}
+    />
+  );
+};
+
+const sheetContentVariants = tv({
+  base: [
+    "[--space:--spacing(6)]",
+    "relative",
+    "max-h-full min-h-0 w-full min-w-0",
+    "flex flex-col",
+    "bg-popover",
+    "text-popover-foreground",
+    "shadow-lg/5",
+    "transition-[opacity,translate] duration-200 ease-in-out will-change-transform",
+    "data-[state=closed]:fade-out-0 data-[state=closed]:animate-out",
+    "data-[state=open]:fade-in-0 data-[state=open]:animate-in",
+    "motion-reduce:animate-none! motion-reduce:transition-none!",
+  ],
+  variants: {
+    placement: {
+      bottom: [
+        "row-start-2 border-t",
+        "data-[state=closed]:slide-in-from-bottom-10 data-[state=open]:slide-in-from-bottom-10",
+      ],
+      top: [
+        "border-b",
+        "data-[state=closed]:slide-out-to-top-10 data-[state=open]:slide-in-from-top-10",
+      ],
+      left: [
+        "w-[calc(100%-(--spacing(12)))] max-w-md",
+        "col-start-2",
+        "border-e",
+        "data-[state=closed]:slide-out-to-start-10 data-[state=open]:slide-in-from-start-10",
+      ],
+      right: [
+        "w-[calc(100%-(--spacing(12)))] max-w-md",
+        "col-start-2",
+        "border-s",
+        "data-[state=closed]:slide-out-to-end-10 data-[state=open]:slide-in-from-end-10",
+      ],
+    },
+    variant: {
+      default: "",
+      inset: [
+        "sm:rounded-2xl sm:border",
+        "sm:**:data-[slot=sheet-footer]:rounded-b-[calc(var(--radius-2xl)-1px)]",
+      ],
+    },
+  },
+  defaultVariants: {
+    placement: "right",
+    variant: "default",
+  },
+});
+
 interface SheetContentProps
-  extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content>,
-    VariantProps<typeof sheetVariants> {}
-
-const SheetContent = React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Content>,
-  SheetContentProps
->(({ side = "right", className, children, ...props }, ref) => (
-  <SheetPortal>
-    <SheetOverlay />
-    <SheetPrimitive.Content
-      ref={ref}
-      className={cn(sheetVariants({ side }), className)}
-      {...props}
-    >
-      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-xl p-1 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
-        <X className="size-4" />
-        <span className="sr-only">Close</span>
-      </SheetPrimitive.Close>
-      {children}
-    </SheetPrimitive.Content>
-  </SheetPortal>
-));
-SheetContent.displayName = SheetPrimitive.Content.displayName;
-
-function SheetHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex flex-col space-y-2 text-center sm:text-left", className)} {...props} />;
+  extends React.ComponentProps<typeof ArkDialog.Content>,
+    VariantProps<typeof sheetContentVariants> {
+  /**
+   * Show close button at the top right corner
+   *
+   * @default true
+   */
+  showCloseButton?: boolean;
 }
 
-function SheetFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2", className)} {...props} />;
-}
+export const SheetContent = (props: SheetContentProps) => {
+  const {
+    showCloseButton = true,
+    placement = "right",
+    variant = "default",
+    className,
+    children,
+    ...rest
+  } = props;
 
-const SheetTitle = React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Title>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Title>
->(({ className, ...props }, ref) => (
-  <SheetPrimitive.Title
-    ref={ref}
-    className={cn("font-display text-lg font-semibold", className)}
-    {...props}
-  />
-));
-SheetTitle.displayName = SheetPrimitive.Title.displayName;
+  return (
+    <Portal>
+      <SheetOverlay />
 
-const SheetDescription = React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Description>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Description>
->(({ className, ...props }, ref) => (
-  <SheetPrimitive.Description
-    ref={ref}
-    className={cn("text-sm text-muted-foreground", className)}
-    {...props}
-  />
-));
-SheetDescription.displayName = SheetPrimitive.Description.displayName;
+      <SheetPositioner placement={placement} variant={variant}>
+        <ArkDialog.Content
+          className={cn(
+            sheetContentVariants({ placement, variant }),
+            className
+          )}
+          data-slot="sheet-content"
+          {...rest}
+        >
+          {children}
 
-export {
-  Sheet,
-  SheetPortal,
-  SheetOverlay,
-  SheetTrigger,
-  SheetClose,
-  SheetContent,
-  SheetHeader,
-  SheetFooter,
-  SheetTitle,
-  SheetDescription,
+          {!!showCloseButton && (
+            <SheetClose asChild>
+              <Button
+                aria-label="Close"
+                className="absolute inset-e-2 top-2 opacity-64 hover:opacity-100"
+                size="icon-sm"
+                variant="ghost"
+              >
+                <XIcon />
+              </Button>
+            </SheetClose>
+          )}
+        </ArkDialog.Content>
+      </SheetPositioner>
+    </Portal>
+  );
+};
+
+export const SheetHeader = (
+  props: React.ComponentProps<typeof DialogHeader>
+) => <DialogHeader data-slot="sheet-header" {...props} />;
+
+export const SheetTitle = (props: React.ComponentProps<typeof DialogTitle>) => (
+  <DialogTitle data-slot="sheet-title" {...props} />
+);
+
+export const SheetDescription = (
+  props: React.ComponentProps<typeof DialogDescription>
+) => <DialogDescription data-slot="sheet-description" {...props} />;
+
+export const SheetBody = (props: React.ComponentProps<typeof DialogBody>) => {
+  const { className, ...rest } = props;
+
+  return (
+    <DialogBody
+      className={cn(
+        "in-[[data-slot=sheet-content]:has([data-slot=sheet-header])]:pt-0",
+        className
+      )}
+      data-slot="sheet-body"
+      {...rest}
+    />
+  );
+};
+
+export const SheetClose = (
+  props: React.ComponentProps<typeof ArkDialog.CloseTrigger>
+) => <ArkDialog.CloseTrigger data-slot="sheet-close" {...props} />;
+
+export const SheetFooter = (
+  props: React.ComponentProps<typeof DialogFooter>
+) => {
+  const { className, ...rest } = props;
+
+  return (
+    <DialogFooter
+      className={cn("sm:rounded-none", className)}
+      data-slot="sheet-footer"
+      {...rest}
+    />
+  );
 };

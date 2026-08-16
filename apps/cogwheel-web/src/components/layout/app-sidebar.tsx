@@ -1,0 +1,159 @@
+import { NavLink, useLocation } from "react-router-dom";
+import { ActivityIcon, CogIcon, HardDriveIcon, SearchIcon } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { PRIMARY_NAV, SECONDARY_NAV, type NavItem } from "@/lib/nav";
+import { formatCount } from "@/lib/format";
+import { protectionState } from "@/lib/derive";
+import { useCogwheel } from "@/data/context";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarSeparator,
+  useSidebar,
+} from "@/components/ui/sidebar";
+import { Kbd } from "@/components/ui/kbd";
+import { Status } from "@/components/ui/status";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
+import { SnoozeControl } from "@/components/layout/snooze-control";
+
+function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
+  const location = useLocation();
+  const active = item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to);
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        asChild
+        isActive={active}
+        tooltip={item.shortcut ? `${item.label} (${item.shortcut})` : item.label}
+      >
+        <NavLink onClick={onNavigate} to={item.to}>
+          {/* A 2px rule marks the active row so the state does not depend on
+              background tint alone at low contrast settings. */}
+          <span
+            aria-hidden
+            className={cn(
+              "absolute inset-y-1 left-0 w-0.5 rounded-full",
+              active ? "bg-primary" : "bg-transparent",
+            )}
+          />
+          <item.icon aria-hidden />
+          <span className="flex-1 truncate">{item.label}</span>
+          {item.shortcut ? (
+            <Kbd className="group-data-[collapsible=icon]:hidden">{item.shortcut}</Kbd>
+          ) : null}
+        </NavLink>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
+export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+  const { data, error, phase } = useCogwheel();
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  const closeOnMobile = () => {
+    if (isMobile) setOpenMobile(false);
+  };
+
+  const offline = Boolean(error) && phase === "ready" && data.dashboard.protection_status === "Loading";
+  const state = protectionState(data.dashboard, offline);
+  const snapshot = data.dashboard.runtime_health.snapshot;
+
+  const statusVariant =
+    state.tone === "good"
+      ? "success"
+      : state.tone === "warn"
+        ? "warning"
+        : state.tone === "bad"
+          ? "destructive"
+          : "default";
+
+  return (
+    <Sidebar collapsible="icon">
+      <SidebarHeader>
+        <NavLink
+          className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-sidebar-accent"
+          onClick={closeOnMobile}
+          to="/"
+        >
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-sidebar-border bg-sidebar-primary text-sidebar-primary-foreground">
+            <CogIcon aria-hidden className="size-4" />
+          </span>
+          <span className="display-tight truncate font-semibold text-base text-foreground group-data-[collapsible=icon]:hidden">
+            Cogwheel
+          </span>
+        </NavLink>
+      </SidebarHeader>
+
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {PRIMARY_NAV.map((item) => (
+                <NavRow item={item} key={item.to} onNavigate={closeOnMobile} />
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarSeparator />
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Appliance</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {SECONDARY_NAV.map((item) => (
+                <NavRow item={item} key={item.to} onNavigate={closeOnMobile} />
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+
+      <SidebarFooter className="gap-3 border-sidebar-border border-t group-data-[collapsible=icon]:hidden">
+        <div className="space-y-1.5 px-1">
+          <p className="flex items-center gap-2 text-foreground text-xs">
+            <Status size="sm" variant={statusVariant} />
+            <span className="font-medium">{state.label}</span>
+          </p>
+          <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
+            <ActivityIcon aria-hidden className="size-3.5" />
+            {formatCount(snapshot.queries_total)} queries · {formatCount(snapshot.blocked_total)} blocked
+          </p>
+          <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
+            <HardDriveIcon aria-hidden className="size-3.5" />
+            {formatCount(data.dashboard.enabled_source_count)} enabled blocklists
+          </p>
+        </div>
+
+        <SnoozeControl />
+
+        <button
+          className={cn(
+            "flex w-full items-center gap-2 rounded-lg border border-sidebar-border px-2 py-1.5",
+            "text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground",
+            "focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
+          )}
+          onClick={onOpenPalette}
+          type="button"
+        >
+          <SearchIcon aria-hidden className="size-3.5" />
+          <span className="flex-1 text-left">Search &amp; commands</span>
+          <Kbd>⌘K</Kbd>
+        </button>
+
+        <ThemeToggle />
+      </SidebarFooter>
+    </Sidebar>
+  );
+}

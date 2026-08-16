@@ -1,26 +1,60 @@
-import * as React from "react";
-import * as SwitchPrimitive from "@radix-ui/react-switch";
+"use client";
+
+import { Switch as ArkSwitch, useSwitchContext } from "@ark-ui/react/switch";
+import type React from "react";
 import { cn } from "@/lib/utils";
 
-const Switch = React.forwardRef<
-  React.ComponentRef<typeof SwitchPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SwitchPrimitive.Root>
->(({ className, ...props }, ref) => (
-  <SwitchPrimitive.Root
-    className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input",
-      className,
-    )}
-    {...props}
-    ref={ref}
-  >
-    <SwitchPrimitive.Thumb
-      className={cn(
-        "pointer-events-none block size-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0",
-      )}
-    />
-  </SwitchPrimitive.Root>
-));
-Switch.displayName = SwitchPrimitive.Root.displayName;
+export const useSwitch = useSwitchContext;
 
-export { Switch };
+export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
+  const { className, tabIndex, ...rest } = props;
+
+  return (
+    <ArkSwitch.Root
+      className={cn(
+        "group/switch",
+        "[--thumb-size:--spacing(5)] sm:[--thumb-size:--spacing(4)]",
+        "h-[calc(var(--thumb-size)+2px)] w-[calc(var(--thumb-size)*2-2px)]",
+        "p-px",
+        "inline-flex shrink-0 items-center",
+        "rounded-full border border-transparent",
+        "transition-all",
+        "outline-none [[data-focus-visible],[data-invalid]]:ring-[3px]",
+        "data-focus-visible:border-primary data-focus-visible:ring-ring/32",
+        "data-invalid:border-destructive data-invalid:ring-destructive/24",
+        "dark:data-invalid:border-destructive-foreground dark:data-invalid:ring-destructive-foreground/20",
+        "data-[state=checked]:bg-primary",
+        "data-[state=unchecked]:bg-input dark:data-[state=unchecked]:bg-input",
+        "data-disabled:pointer-events-none data-disabled:opacity-64",
+        "motion-reduce:transition-none!",
+        className
+      )}
+      data-slot="switch"
+      {...rest}
+    >
+      <ArkSwitch.Control
+        className="flex size-full items-center"
+        data-slot="switch-control"
+      >
+        <ArkSwitch.Thumb
+          className={cn(
+            "block",
+            "aspect-square h-full w-auto",
+            "bg-background",
+            "rounded-full ring-0",
+            "pointer-events-none",
+            "transition-transform",
+            "data-[state=checked]:translate-x-[calc(var(--thumb-size)-4px)]",
+            "dark:data-[state=checked]:bg-primary-foreground",
+            "data-[state=unchecked]:translate-x-0",
+            "dark:data-[state=unchecked]:bg-foreground",
+            "motion-reduce:transition-none!"
+          )}
+          data-slot="switch-thumb"
+        />
+      </ArkSwitch.Control>
+
+      <ArkSwitch.HiddenInput tabIndex={tabIndex} />
+    </ArkSwitch.Root>
+  );
+};

@@ -1,13 +1,105 @@
+/**
+ * The complete Cogwheel control-plane HTTP contract.
+ *
+ * Field naming is deliberately inconsistent because the wire is: every legacy
+ * `/api/v1` handler serialises Rust structs verbatim (snake_case fields,
+ * PascalCase enums), while the rewritten classifier endpoints emit camelCase.
+ * Renaming either side here would only hide the seam, so the types mirror the
+ * wire exactly and the UI layer does the translating.
+ */
+
+const API_BASE =
+  import.meta.env.VITE_COGWHEEL_API_BASE ??
+  (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8080");
+
+/** Thrown for every non-2xx response so callers can branch on status. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly path: string;
+
+  constructor(message: string, status: number, path: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.path = path;
+  }
+}
+
+export function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "Unknown error";
+}
+
+type RequestOptions = { signal?: AbortSignal };
+
+async function request(path: string, init: RequestInit, options?: RequestOptions): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: options?.signal,
+      headers: {
+        "Content-Type": "application/json",
+        // Marks the call as programmatic so the SPA fallback cannot be mistaken
+        // for a navigation and answered with index.html.
+        "X-Requested-With": "XMLHttpRequest",
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    throw new ApiError("The control plane is unreachable.", 0, path);
+  }
+
+  if (!response.ok) {
+    // Style-A handlers answer with an empty body, so fall back to the status line.
+    const detail = (await response.text().catch(() => "")).trim();
+    throw new ApiError(detail || `${response.status} ${response.statusText}`, response.status, path);
+  }
+
+  return response;
+}
+
+/** Every JSON handler wraps its payload in `{ data: T }`. */
+async function fetchJson<T>(path: string, init: RequestInit = {}, options?: RequestOptions): Promise<T> {
+  const response = await request(path, init, options);
+  const payload = (await response.json()) as { data: T };
+  return payload.data;
+}
+
+/** `pause`/`resume` return HTTP 200 with an empty body, breaking the envelope. */
+async function fetchVoid(path: string, init: RequestInit = {}, options?: RequestOptions): Promise<void> {
+  await request(path, init, options);
+}
+
+const post = (body?: unknown): RequestInit => ({
+  method: "POST",
+  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+});
+
+/* ------------------------------------------------------------------------- */
+/* Legacy `/api/v1` types — snake_case, matching the Rust serialisation.       */
+/* ------------------------------------------------------------------------- */
+
+export type DnsRuntimeSnapshot = {
+  upstream_failures_total: number;
+  fallback_served_total: number;
+  cache_hits_total: number;
+  cname_uncloaks_total: number;
+  cname_blocks_total: number;
+  queries_total: number;
+  blocked_total: number;
+  cache_hit_latency_avg_ns: number;
+  cache_hit_samples: number;
+  cache_miss_latency_avg_ns: number;
+  cache_miss_samples: number;
+  classifier_latency_avg_ns: number;
+  classifier_latency_samples: number;
+};
+
 export type RuntimeHealth = {
-  snapshot: {
-    upstream_failures_total: number;
-    fallback_served_total: number;
-    cache_hits_total: number;
-    cname_uncloaks_total: number;
-    cname_blocks_total: number;
-    queries_total: number;
-    blocked_total: number;
-  };
+  snapshot: DnsRuntimeSnapshot;
   degraded: boolean;
   notes: string[];
 };
@@ -22,6 +114,7 @@ export type RulesetSummary = {
 export type AuditEvent = {
   id: string;
   event_type: string;
+  /** JSON, double-encoded as a string on the wire. */
   payload: string;
   created_at: string;
 };
@@ -44,17 +137,26 @@ export type BlocklistStatus = {
   due_for_refresh: boolean;
 };
 
+export type ServiceMode = "Inherit" | "Allow" | "Block";
+
+export type ServiceManifest = {
+  service_id: string;
+  display_name: string;
+  category: string;
+  risk_notes: string;
+  allow_domains: string[];
+  block_domains: string[];
+  exceptions: string[];
+};
+
 export type ServiceToggle = {
-  manifest: {
-    service_id: string;
-    display_name: string;
-    category: string;
-    risk_notes: string;
-    allow_domains: string[];
-    block_domains: string[];
-    exceptions: string[];
-  };
-  mode: "Inherit" | "Allow" | "Block";
+  manifest: ServiceManifest;
+  mode: ServiceMode;
+};
+
+export type DeviceServiceOverride = {
+  service_id: string;
+  mode: "allow" | "block";
 };
 
 export type DeviceRecord = {
@@ -68,16 +170,6 @@ export type DeviceRecord = {
   service_overrides: DeviceServiceOverride[];
 };
 
-export type BlockProfileRecord = {
-  id: string;
-  emoji: string;
-  name: string;
-  description: string;
-  blocklists: BlockProfileListRecord[];
-  allowlists: string[];
-  updated_at: string;
-};
-
 export type BlockProfileListRecord = {
   id: string;
   name: string;
@@ -86,9 +178,14 @@ export type BlockProfileListRecord = {
   family: string;
 };
 
-export type DeviceServiceOverride = {
-  service_id: string;
-  mode: "allow" | "block";
+export type BlockProfileRecord = {
+  id: string;
+  emoji: string;
+  name: string;
+  description: string;
+  blocklists: BlockProfileListRecord[];
+  allowlists: string[];
+  updated_at: string;
 };
 
 export type SecurityEventRecord = {
@@ -115,10 +212,7 @@ export type SecuritySummary = {
   top_devices: DeviceSecuritySummary[];
 };
 
-export type DomainInsightEntry = {
-  domain: string;
-  count: number;
-};
+export type DomainInsightEntry = { domain: string; count: number };
 
 export type DomainInsights = {
   top_queried_domains: DomainInsightEntry[];
@@ -126,10 +220,12 @@ export type DomainInsights = {
   observed_queries: number;
 };
 
+export type NotificationSeverity = "medium" | "high" | "critical";
+
 export type NotificationSettings = {
   enabled: boolean;
   webhook_url: string | null;
-  min_severity: "medium" | "high" | "critical";
+  min_severity: NotificationSeverity;
 };
 
 export type NotificationDeliveryEvent = {
@@ -153,24 +249,18 @@ export type NotificationHealthSummary = {
   last_failure_at: string | null;
 };
 
-export type NotificationFailureDomain = {
-  domain: string;
-  failure_count: number;
-};
+export type NotificationFailureDomain = { domain: string; failure_count: number };
 
 export type NotificationFailureAnalytics = {
   success_rate_percent: number;
   top_failed_domains: NotificationFailureDomain[];
 };
 
-export type NotificationTestResult = {
-  outcome: string;
-  target: string;
-};
+export type NotificationTestResult = { outcome: string; target: string };
 
 export type NotificationTestRequest = {
   domain?: string;
-  severity?: NotificationSettings["min_severity"];
+  severity?: NotificationSeverity;
   device_name?: string;
   dry_run?: boolean;
 };
@@ -178,7 +268,7 @@ export type NotificationTestRequest = {
 export type NotificationTestPreset = {
   name: string;
   domain: string;
-  severity: NotificationSettings["min_severity"];
+  severity: NotificationSeverity;
   device_name: string;
   dry_run: boolean;
 };
@@ -201,6 +291,29 @@ export type DashboardSummary = {
   domain_insights: DomainInsights;
 };
 
+export type LegacyClassifierSettings = {
+  mode: "Off" | "Monitor" | "Protect";
+  threshold: number;
+};
+
+export type RuntimeGuardConfig = {
+  probe_domains: string[];
+  max_upstream_failures_delta: number;
+  max_fallback_served_delta: number;
+};
+
+export type SettingsSummary = {
+  blocklists: SourceRecord[];
+  blocklist_statuses: BlocklistStatus[];
+  block_profiles: BlockProfileRecord[];
+  devices: DeviceRecord[];
+  services: ServiceToggle[];
+  classifier: LegacyClassifierSettings;
+  notifications: NotificationSettings;
+  notification_test_presets: NotificationTestPreset[];
+  runtime_guard: RuntimeGuardConfig;
+};
+
 export type SyncPeerStatus = {
   node_public_key: string;
   imports: number;
@@ -219,6 +332,9 @@ export type SyncNodeStatus = {
   peers: SyncPeerStatus[];
 };
 
+export type SyncProfileView = { profile: string };
+export type SyncTransportView = { mode: string; token_configured: boolean };
+
 export type TailscaleStatus = {
   installed: boolean;
   daemon_running: boolean;
@@ -232,17 +348,12 @@ export type TailscaleStatus = {
   last_error: string | null;
 };
 
-export type TailscaleExitNodeResult = {
-  success: boolean;
-  message: string;
-};
-
+export type TailscaleExitNodeResult = { success: boolean; message: string };
 export type TailscaleRollbackResult = {
   success: boolean;
   message: string;
   previous_state: boolean | null;
 };
-
 export type TailscaleDnsCheckResult = {
   configured: boolean;
   message: string;
@@ -258,6 +369,8 @@ export type LoadTestResult = {
   avg_latency_ms: number;
   p95_latency_ms: number;
   p99_latency_ms: number;
+  /** Echoed back from the request; the server does not measure it. */
+  cache_hit_ratio: number;
   throughput_qps: number;
   errors: string[];
 };
@@ -326,36 +439,6 @@ export type FederatedLearningSettings = {
   recommendations: string[];
 };
 
-export type SyncProfileView = {
-  profile: string;
-};
-
-export type SyncTransportView = {
-  mode: string;
-  token_configured: boolean;
-};
-
-export type SettingsSummary = {
-  blocklists: SourceRecord[];
-  blocklist_statuses: BlocklistStatus[];
-  block_profiles: BlockProfileRecord[];
-  devices: DeviceRecord[];
-  services: ServiceToggle[];
-  classifier: {
-    mode: "Off" | "Monitor" | "Protect";
-    threshold: number;
-  };
-  notifications: NotificationSettings;
-  notification_test_presets: NotificationTestPreset[];
-  runtime_guard: {
-    probe_domains: string[];
-    max_upstream_failures_delta: number;
-    max_fallback_served_delta: number;
-  };
-};
-
-const API_BASE = import.meta.env.VITE_COGWHEEL_API_BASE ?? (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8080");
-
 export type ResolverAccessStatus = {
   hostname: string | null;
   dns_targets: string[];
@@ -363,103 +446,230 @@ export type ResolverAccessStatus = {
   notes: string[];
 };
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const { headers: extraHeaders, ...restInit } = init ?? {};
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...restInit,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-With": "XMLHttpRequest",
-      ...(extraHeaders instanceof Headers
-        ? Object.fromEntries(extraHeaders.entries())
-        : Array.isArray(extraHeaders)
-          ? Object.fromEntries(extraHeaders)
-          : extraHeaders),
-    },
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).trim();
-    throw new Error(detail || `${response.status} ${response.statusText}`);
-  }
-  const payload = (await response.json()) as { data: T };
-  return payload.data;
-}
+export type RefreshResponse = {
+  outcome: string;
+  ruleset?: RulesetSummary | null;
+  notes: string[];
+};
+
+export type BackupData = {
+  version: string;
+  created_at: string;
+  sources: SourceRecord[];
+  devices: DeviceRecord[];
+  classifier: LegacyClassifierSettings;
+  notifications: NotificationSettings;
+};
+
+export type BackupResult = { success: boolean; message: string; size_bytes: number };
+
+/** Signed replication envelope. The payload is base64url of a SyncStatePayloadV1. */
+export type SyncEnvelope = {
+  node_public_key: string;
+  timestamp: string;
+  nonce: string;
+  payload_b64: string;
+  signature_b64: string;
+};
+
+export type SyncImportResult = {
+  imported_sources: number;
+  imported_devices: number;
+  applied_revision: number;
+  profile: string;
+};
+
+export type ResilienceDrillResult = {
+  drill_type: string;
+  success: boolean;
+  message: string;
+  recommendations: string[];
+};
+
+export type ResilienceDrill =
+  | "upstream-outage"
+  | "db-corruption"
+  | "source-failure"
+  | "sync-partition";
+
+/* ------------------------------------------------------------------------- */
+/* Rewritten classifier contract — camelCase (04-design-system.md §5).         */
+/* ------------------------------------------------------------------------- */
+
+export type ClassifierMode = "off" | "monitor" | "protect";
+export type ClassifierSensitivity = "low" | "balanced" | "high";
+
+export type SensitivityTriple = Record<ClassifierSensitivity, number>;
+
+export type ClassifierStatus = {
+  settings: { mode: ClassifierMode; sensitivity: ClassifierSensitivity };
+  model: {
+    version: number;
+    trainedAt: string;
+    rocAuc: number;
+    prAuc: number;
+    residentBytes: number;
+    thresholds: SensitivityTriple;
+    /** Measured on the held-out split, expressed as a fraction (0.00099 = 0.099%). */
+    falsePositiveRate: SensitivityTriple;
+    recall: SensitivityTriple;
+  };
+  stats: {
+    scored: number;
+    cacheHits: number;
+    cacheMisses: number;
+    dropped: number;
+    blocked: number;
+    protectedOverrides: number;
+    cachedEntries: number;
+  };
+  activeThreshold: number;
+};
+
+export type InspectionContribution = {
+  label: string;
+  kind: "dense" | "ngram";
+  /** Signed contribution to the score: positive pushes toward "ad domain". */
+  value: number;
+};
+
+export type Inspection = {
+  domain: string;
+  probability: number;
+  protected: boolean;
+  decision: "allow" | "block";
+  activeThreshold: number;
+  blocklistMatch: string | null;
+  contributions: InspectionContribution[];
+};
+
+export type ClassifierDetection = {
+  domain: string;
+  probability: number;
+  decision: "allow" | "block";
+  protected: boolean;
+  observedAt: string;
+  client: string;
+};
+
+/* ------------------------------------------------------------------------- */
+/* Server-sent events (`GET /api/v1/events/stream`).                          */
+/* ------------------------------------------------------------------------- */
+
+export type StreamQueryEvent = {
+  domain: string;
+  client: string;
+  deviceName?: string | null;
+  blocked: boolean;
+  reason?: string | null;
+  observedAt: string;
+  latencyMs?: number | null;
+};
+
+export type StreamDetectionEvent = {
+  domain: string;
+  client: string;
+  deviceName?: string | null;
+  probability: number;
+  decision: "allow" | "block";
+  observedAt: string;
+};
+
+export type StreamHealthEvent = {
+  degraded: boolean;
+  notes?: string[];
+  observedAt?: string;
+};
+
+export const eventsStreamUrl = `${API_BASE}/api/v1/events/stream`;
+
+/* ------------------------------------------------------------------------- */
+/* Client                                                                     */
+/* ------------------------------------------------------------------------- */
 
 export const api = {
-  dashboard: (notificationWindow?: number, notificationHistoryWindow?: number) => {
+  /* --- Read: overview ---------------------------------------------------- */
+  dashboard: (notificationWindow?: number, notificationHistoryWindow?: number, options?: RequestOptions) => {
     const params = new URLSearchParams();
-    if (notificationWindow) {
-      params.set("notification_window", String(notificationWindow));
-    }
-    if (notificationHistoryWindow) {
+    if (notificationWindow !== undefined) params.set("notification_window", String(notificationWindow));
+    if (notificationHistoryWindow !== undefined)
       params.set("notification_history_window", String(notificationHistoryWindow));
-    }
     const query = params.toString();
-    return fetchJson<DashboardSummary>(query ? `/api/v1/dashboard?${query}` : "/api/v1/dashboard");
+    return fetchJson<DashboardSummary>(`/api/v1/dashboard${query ? `?${query}` : ""}`, {}, options);
   },
-  settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
-  syncStatus: () => fetchJson<SyncNodeStatus>("/api/v1/sync/status"),
-  syncProfile: () => fetchJson<SyncProfileView>("/api/v1/sync/profile"),
-  updateSyncProfile: (profile: string) =>
-    fetchJson<SyncProfileView>("/api/v1/sync/profile", {
-      method: "POST",
-      body: JSON.stringify({ profile }),
-    }),
-  syncTransport: () => fetchJson<SyncTransportView>("/api/v1/sync/transport"),
-  updateSyncTransport: (mode: string, token?: string) =>
-    fetchJson<SyncTransportView>("/api/v1/sync/transport", {
-      method: "POST",
-      body: JSON.stringify({ mode, token }),
-    }),
-  refreshSources: () =>
-    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {
-      method: "POST",
-    }),
-  rollbackRuleset: () =>
-    fetchJson<{ id: string; hash: string; status: string; created_at: string }>(
-      "/api/v1/rulesets/rollback",
-      {
-        method: "POST",
-      },
-    ),
-  runtimeHealthCheck: () =>
-    fetchJson<RuntimeHealth>("/api/v1/runtime/health/check", {
-      method: "POST",
-    }),
-  pauseRuntime: (minutes: number) =>
-    fetchJson<void>("/api/v1/runtime/pause", {
-      method: "POST",
-      body: JSON.stringify({ minutes }),
-    }),
-  resumeRuntime: () =>
-    fetchJson<void>("/api/v1/runtime/resume", {
-      method: "POST",
-    }),
-  updateClassifier: (mode: SettingsSummary["classifier"]["mode"], threshold: number) =>
-    fetchJson<SettingsSummary["classifier"]>("/api/v1/settings/classifier", {
-      method: "POST",
-      body: JSON.stringify({ mode, threshold }),
-    }),
-  updateNotifications: (input: NotificationSettings) =>
-    fetchJson<NotificationSettings>("/api/v1/settings/notifications", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  testNotifications: (input?: NotificationTestRequest) =>
-    fetchJson<NotificationTestResult>("/api/v1/settings/notifications/test", {
-      method: "POST",
-      body: JSON.stringify(input ?? {}),
-    }),
-  updateNotificationTestPresets: (presets: NotificationTestPreset[]) =>
-    fetchJson<NotificationTestPreset[]>("/api/v1/settings/notifications/presets", {
-      method: "POST",
-      body: JSON.stringify({ presets }),
-    }),
-  upsertBlocklist: (input: Partial<SourceRecord> & { name: string; url: string; kind: string }) =>
-    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {
-      method: "POST",
-      body: JSON.stringify({ ...input, refresh_now: true }),
-    }),
+  settings: (options?: RequestOptions) => fetchJson<SettingsSummary>("/api/v1/settings", {}, options),
+  runtimeSnapshot: (options?: RequestOptions) =>
+    fetchJson<DnsRuntimeSnapshot>("/api/v1/runtime", {}, options),
+  runtimeHealth: (options?: RequestOptions) => fetchJson<RuntimeHealth>("/api/v1/runtime/health", {}, options),
+  resolverAccess: (options?: RequestOptions) =>
+    fetchJson<ResolverAccessStatus>("/api/v1/resolver-access", {}, options),
+  securityEvents: (options?: RequestOptions) =>
+    fetchJson<SecurityEventRecord[]>("/api/v1/security-events", {}, options),
+  auditEvents: (options?: RequestOptions) => fetchJson<AuditEvent[]>("/api/v1/audit-events", {}, options),
+  devices: (options?: RequestOptions) => fetchJson<DeviceRecord[]>("/api/v1/devices", {}, options),
+  sources: (options?: RequestOptions) => fetchJson<SourceRecord[]>("/api/v1/sources", {}, options),
+  services: (options?: RequestOptions) => fetchJson<ServiceToggle[]>("/api/v1/services", {}, options),
+  rulesets: (options?: RequestOptions) => fetchJson<RulesetSummary[]>("/api/v1/rulesets", {}, options),
+  latencyBudget: (options?: RequestOptions) =>
+    fetchJson<LatencyBudgetStatus>("/api/v1/latency-budget", {}, options),
+  falsePositiveBudget: (options?: RequestOptions) =>
+    fetchJson<FalsePositiveBudgetStatus>("/api/v1/false-positive-budget", {}, options),
+  configVersion: (options?: RequestOptions) =>
+    fetchJson<ConfigVersionStatus>("/api/v1/config/version", {}, options),
+  backup: (options?: RequestOptions) => fetchJson<BackupData>("/api/v1/backup", {}, options),
+
+  /* --- Read: sync / tailscale -------------------------------------------- */
+  syncStatus: (options?: RequestOptions) => fetchJson<SyncNodeStatus>("/api/v1/sync/status", {}, options),
+  syncProfile: (options?: RequestOptions) => fetchJson<SyncProfileView>("/api/v1/sync/profile", {}, options),
+  syncTransport: (options?: RequestOptions) =>
+    fetchJson<SyncTransportView>("/api/v1/sync/transport", {}, options),
+  tailscaleStatus: (options?: RequestOptions) =>
+    fetchJson<TailscaleStatus>("/api/v1/tailscale/status", {}, options),
+  tailscaleDnsCheck: (options?: RequestOptions) =>
+    fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check", {}, options),
+
+  /* --- Read: integrations ------------------------------------------------ */
+  threatIntelProviders: (options?: RequestOptions) =>
+    fetchJson<ThreatIntelSettings>("/api/v1/threat-intel/providers", {}, options),
+  federatedLearningStatus: (options?: RequestOptions) =>
+    fetchJson<FederatedLearningSettings>("/api/v1/federated-learning/status", {}, options),
+
+  /* --- Classifier (rewritten contract) ----------------------------------- */
+  classifier: (options?: RequestOptions) => fetchJson<ClassifierStatus>("/api/v1/classifier", {}, options),
+  updateClassifier: (mode: ClassifierMode, sensitivity: ClassifierSensitivity) =>
+    fetchJson<ClassifierStatus>("/api/v1/classifier/settings", post({ mode, sensitivity })),
+  inspectDomain: (domain: string, options?: RequestOptions) =>
+    fetchJson<Inspection>("/api/v1/classifier/inspect", post({ domain }), options),
+  classifierDetections: (limit = 50, options?: RequestOptions) =>
+    fetchJson<ClassifierDetection[]>(`/api/v1/classifier/detections?limit=${limit}`, {}, options),
+
+  /* --- Runtime ----------------------------------------------------------- */
+  pauseRuntime: (minutes: number) => fetchVoid("/api/v1/runtime/pause", post({ minutes })),
+  resumeRuntime: () => fetchVoid("/api/v1/runtime/resume", post()),
+  runtimeHealthCheck: () => fetchJson<RuntimeHealth>("/api/v1/runtime/health/check", post()),
+
+  /* --- Sources / blocklists ---------------------------------------------- */
+  refreshSources: () => fetchJson<RefreshResponse>("/api/v1/sources/refresh", post()),
+  upsertBlocklist: (input: {
+    id?: string;
+    name: string;
+    url: string;
+    kind: string;
+    enabled: boolean;
+    refresh_interval_minutes?: number;
+    profile?: string;
+    verification_strictness?: string;
+  }) => fetchJson<RefreshResponse>("/api/v1/settings/blocklists", post({ ...input, refresh_now: true })),
+  setBlocklistEnabled: (id: string, enabled: boolean) =>
+    fetchJson<RefreshResponse>("/api/v1/settings/blocklists/state", post({ id, enabled, refresh_now: true })),
+  deleteBlocklist: (id: string) =>
+    fetchJson<RefreshResponse>("/api/v1/settings/blocklists/delete", post({ id, refresh_now: true })),
+
+  /* --- Services ---------------------------------------------------------- */
+  updateService: (service_id: string, mode: ServiceMode) =>
+    fetchJson<RefreshResponse>("/api/v1/services/toggles", post({ service_id, mode })),
+
+  /* --- Block profiles ----------------------------------------------------- */
   upsertBlockProfile: (input: {
     id?: string;
     emoji: string;
@@ -467,31 +677,11 @@ export const api = {
     description?: string;
     blocklists: BlockProfileListRecord[];
     allowlists: string[];
-  }) =>
-    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
+  }) => fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles", post(input)),
   deleteBlockProfile: (id: string) =>
-    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles/delete", {
-      method: "POST",
-      body: JSON.stringify({ id }),
-    }),
-  setBlocklistEnabled: (id: string, enabled: boolean) =>
-    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists/state", {
-      method: "POST",
-      body: JSON.stringify({ id, enabled, refresh_now: true }),
-    }),
-  deleteBlocklist: (id: string) =>
-    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists/delete", {
-      method: "POST",
-      body: JSON.stringify({ id, refresh_now: true }),
-    }),
-  updateService: (service_id: string, mode: ServiceToggle["mode"]) =>
-    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/services/toggles", {
-      method: "POST",
-      body: JSON.stringify({ service_id, mode }),
-    }),
+    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles/delete", post({ id })),
+
+  /* --- Devices ------------------------------------------------------------ */
   upsertDevice: (input: {
     id?: string;
     name: string;
@@ -501,54 +691,64 @@ export const api = {
     protection_override?: DeviceRecord["protection_override"];
     allowed_domains?: string[];
     service_overrides?: DeviceServiceOverride[];
-  }) =>
-    fetchJson<DeviceRecord>("/api/v1/devices", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  securityEvents: () => fetchJson<SecurityEventRecord[]>("/api/v1/security-events"),
-  tailscaleStatus: () => fetchJson<TailscaleStatus>("/api/v1/tailscale/status"),
+  }) => fetchJson<DeviceRecord>("/api/v1/devices", post(input)),
+
+  /* --- Notifications ------------------------------------------------------ */
+  updateNotifications: (input: NotificationSettings) =>
+    fetchJson<NotificationSettings>("/api/v1/settings/notifications", post(input)),
+  testNotifications: (input: NotificationTestRequest = {}) =>
+    fetchJson<NotificationTestResult>("/api/v1/settings/notifications/test", post(input)),
+  updateNotificationTestPresets: (presets: NotificationTestPreset[]) =>
+    fetchJson<NotificationTestPreset[]>("/api/v1/settings/notifications/presets", post({ presets })),
+
+  /* --- Rulesets ----------------------------------------------------------- */
+  rollbackRuleset: () => fetchJson<RulesetSummary>("/api/v1/rulesets/rollback", post()),
+
+  /* --- Sync --------------------------------------------------------------- */
+  exportSyncState: (profile?: string, options?: RequestOptions) =>
+    fetchJson<SyncEnvelope>(
+      `/api/v1/sync/export${profile ? `?profile=${encodeURIComponent(profile)}` : ""}`,
+      {},
+      options,
+    ),
+  importSyncState: (envelope: SyncEnvelope) =>
+    fetchJson<SyncImportResult>("/api/v1/sync/import", post({ envelope })),
+  updateSyncProfile: (profile: string) =>
+    fetchJson<SyncProfileView>("/api/v1/sync/profile", post({ profile })),
+  updateSyncTransport: (mode: string, token?: string) =>
+    fetchJson<SyncTransportView>("/api/v1/sync/transport", post({ mode, token })),
+
+  /* --- Tailscale ---------------------------------------------------------- */
   tailscaleExitNode: (enabled: boolean) =>
-    fetchJson<TailscaleExitNodeResult>("/api/v1/tailscale/exit-node", {
-      method: "POST",
-      body: JSON.stringify({ enabled }),
-    }),
-  tailscaleRollback: () =>
-    fetchJson<TailscaleRollbackResult>("/api/v1/tailscale/rollback", {
-      method: "POST",
-    }),
-  tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
-  resolverAccess: () => fetchJson<ResolverAccessStatus>("/api/v1/resolver-access"),
-  falsePositiveBudget: () =>
-    fetchJson<FalsePositiveBudgetStatus>("/api/v1/false-positive-budget"),
-  latencyBudget: () => fetchJson<LatencyBudgetStatus>("/api/v1/latency-budget"),
-  runLoadTest: (duration_secs: number, qps: number, cache_hit_ratio: number) =>
-    fetchJson<LoadTestResult>("/api/v1/load-test", {
-      method: "POST",
-      body: JSON.stringify({ duration_secs, qps, cache_hit_ratio }),
-    }),
-  configVersion: () => fetchJson<ConfigVersionStatus>("/api/v1/config/version"),
-  threatIntelProviders: () =>
-    fetchJson<ThreatIntelSettings>("/api/v1/threat-intel/providers"),
+    fetchJson<TailscaleExitNodeResult>("/api/v1/tailscale/exit-node", post({ enabled })),
+  tailscaleRollback: () => fetchJson<TailscaleRollbackResult>("/api/v1/tailscale/rollback", post()),
+
+  /* --- Integrations ------------------------------------------------------- */
   updateThreatIntelProvider: (
     id: string,
     enabled: boolean,
     feed_url: string | null,
     update_interval_minutes: number,
   ) =>
-    fetchJson<ThreatIntelSettings>("/api/v1/threat-intel/providers", {
-      method: "POST",
-      body: JSON.stringify({ id, enabled, feed_url, update_interval_minutes }),
-    }),
-  federatedLearningStatus: () =>
-    fetchJson<FederatedLearningSettings>("/api/v1/federated-learning/status"),
-  updateFederatedLearningStatus: (
+    fetchJson<ThreatIntelSettings>(
+      "/api/v1/threat-intel/providers",
+      post({ id, enabled, feed_url, update_interval_minutes }),
+    ),
+  updateFederatedLearning: (
     enabled: boolean,
     coordinator_url: string | null,
     round_interval_hours: number,
   ) =>
-    fetchJson<FederatedLearningSettings>("/api/v1/federated-learning/status", {
-      method: "POST",
-      body: JSON.stringify({ enabled, coordinator_url, round_interval_hours }),
-    }),
+    fetchJson<FederatedLearningSettings>(
+      "/api/v1/federated-learning/status",
+      post({ enabled, coordinator_url, round_interval_hours }),
+    ),
+
+  /* --- Diagnostics -------------------------------------------------------- */
+  restoreBackup: (data: BackupData) =>
+    fetchJson<BackupResult>("/api/v1/backup/restore", post({ data })),
+  runResilienceDrill: (drill: ResilienceDrill) =>
+    fetchJson<ResilienceDrillResult>(`/api/v1/resilience/${drill}`, post({})),
+  runLoadTest: (duration_secs: number, qps: number, cache_hit_ratio: number) =>
+    fetchJson<LoadTestResult>("/api/v1/load-test", post({ duration_secs, qps, cache_hit_ratio })),
 };

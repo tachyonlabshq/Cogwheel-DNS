@@ -1,80 +1,176 @@
-import * as React from "react"
-import { cn } from "@/lib/utils"
+import { ark } from "@ark-ui/react/factory";
+import { tv, type VariantProps } from "tailwind-variants";
+import { cn } from "@/lib/utils";
 
-function Card({ className, ...props }: React.ComponentProps<"div">) {
+export const Card = (props: React.ComponentProps<typeof ark.div>) => {
+  const { className, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn(
+        "[--space:--spacing(6)]",
+        "group/card",
+        "py-(--space)",
+        "flex flex-col gap-4",
+        "bg-card",
+        "text-foreground",
+        "has-data-[variant=image]:pt-0 has-data-[slot=card-footer]:pb-0",
+        "rounded-xl border shadow-xs/5",
+        className
+      )}
       data-slot="card"
-      className={cn(
-        "bg-card text-card-foreground flex flex-col gap-4 rounded-xl py-4 text-sm ring-1 ring-foreground/10",
-        className
-      )}
-      {...props}
+      {...rest}
     />
-  )
+  );
+};
+
+const cardMediaVariants = tv({
+  base: [
+    "flex shrink-0 items-center gap-2",
+    "[&_svg]:pointer-events-none",
+    "px-(--space)",
+  ],
+  variants: {
+    variant: {
+      default: "bg-transparent",
+      icon: "[&_svg:not([class*='size-'])]:size-4",
+      image: [
+        "overflow-hidden rounded-t-sm",
+        "px-0",
+        "[&_img]:size-full [&_img]:object-cover",
+      ],
+    },
+  },
+  defaultVariants: {
+    variant: "default",
+  },
+});
+
+interface CardMediaProps
+  extends React.ComponentProps<typeof ark.div>,
+    VariantProps<typeof cardMediaVariants> {}
+
+export const CardMedia = (props: CardMediaProps) => {
+  const { variant = "default", className, ...rest } = props;
+
+  return (
+    <ark.div
+      className={cn(cardMediaVariants({ variant }), className)}
+      data-slot="card-media"
+      data-variant={variant}
+      {...rest}
+    />
+  );
+};
+
+interface HeaderProps extends React.ComponentProps<typeof ark.div> {
+  /**
+   * The description of the card
+   */
+  description?: string;
+  /**
+   * The title of the card
+   */
+  title?: string;
 }
 
-function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
+export const CardHeader = (props: HeaderProps) => {
+  const { title, description, className, children, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn(
+        "grid auto-rows-min grid-rows-[auto_auto] gap-1",
+        "px-(--space)",
+        "items-start",
+        "has-data-[slot=card-action]:grid-cols-[1fr_auto]",
+        className
+      )}
       data-slot="card-header"
+      {...rest}
+    >
+      {!!title && <CardTitle>{title}</CardTitle>}
+      {!!description && <CardDescription>{description}</CardDescription>}
+      {!title && typeof children === "string" ? (
+        <CardTitle>{children}</CardTitle>
+      ) : (
+        children
+      )}
+    </ark.div>
+  );
+};
+
+export const CardTitle = (props: React.ComponentProps<typeof ark.div>) => {
+  const { className, ...rest } = props;
+
+  return (
+    <ark.div
       className={cn(
-        "flex flex-col gap-1 px-4 has-data-[slot=card-action]:grid has-data-[slot=card-action]:grid-cols-[1fr_auto]",
+        "font-heading font-semibold text-foreground text-lg/6",
         className
       )}
-      {...props}
-    />
-  )
-}
-
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
       data-slot="card-title"
-      className={cn("font-display text-base font-medium leading-none", className)}
-      {...props}
+      {...rest}
     />
-  )
-}
+  );
+};
 
-function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+export const CardDescription = (
+  props: React.ComponentProps<typeof ark.div>
+) => {
+  const { className, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn("row-start-2", "text-muted-foreground text-sm", className)}
       data-slot="card-description"
-      className={cn("text-muted-foreground text-sm", className)}
-      {...props}
+      {...rest}
     />
-  )
-}
+  );
+};
 
-function CardAction({ className, ...props }: React.ComponentProps<"div">) {
+export const CardAction = (props: React.ComponentProps<typeof ark.div>) => {
+  const { className, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn(
+        "col-start-2 row-span-2 row-start-1 self-start justify-self-end",
+        className
+      )}
       data-slot="card-action"
-      className={cn("col-start-2 row-span-2 row-start-1 self-start justify-self-end", className)}
-      {...props}
+      {...rest}
     />
-  )
-}
+  );
+};
 
-function CardContent({ className, ...props }: React.ComponentProps<"div">) {
+export const CardContent = (props: React.ComponentProps<typeof ark.div>) => {
+  const { className, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn("px-(--space)", className)}
       data-slot="card-content"
-      className={cn("px-4", className)}
-      {...props}
+      {...rest}
     />
-  )
-}
+  );
+};
 
-function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+export const CardFooter = (props: React.ComponentProps<typeof ark.div>) => {
+  const { className, ...rest } = props;
+
   return (
-    <div
+    <ark.div
+      className={cn(
+        "flex items-center gap-2",
+        "px-(--space)",
+        "bg-muted/48",
+        "rounded-b-xl border-t",
+        "py-(--space)",
+        className
+      )}
       data-slot="card-footer"
-      className={cn("flex items-center rounded-b-xl border-t bg-muted/50 p-4", className)}
-      {...props}
+      {...rest}
     />
-  )
-}
-
-export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardAction, CardContent }
+  );
+};
