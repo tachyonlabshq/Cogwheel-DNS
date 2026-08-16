@@ -23,28 +23,30 @@ export const alertVariants = tv({
         "[&_svg]:text-muted-foreground",
         "[&_[data-slot=alert-action]_[data-variant=ghost]]:hover:bg-muted",
       ],
+      // Icons take the readable 700/300 partner; the 400 accent stays on the
+      // surface and the hairline, where §3.3 allows it.
       destructive: [
         "bg-destructive/4",
         "border-destructive/32",
-        "[&_svg]:text-destructive",
+        "[&_svg]:text-destructive-foreground",
         "[&_[data-slot=alert-action]_[data-variant=ghost]]:hover:bg-destructive/10",
       ],
       info: [
         "bg-info/4",
         "border-info/32",
-        "[&_svg]:text-info",
+        "[&_svg]:text-info-foreground",
         "[&_[data-slot=alert-action]_[data-variant=ghost]]:hover:bg-info/10",
       ],
       warning: [
         "bg-warning/4",
         "border-warning/32",
-        "[&_svg]:text-warning",
+        "[&_svg]:text-warning-foreground",
         "[&_[data-slot=alert-action]_[data-variant=ghost]]:hover:bg-warning/10",
       ],
       success: [
         "bg-success/4",
         "border-success/32",
-        "[&_svg]:text-success",
+        "[&_svg]:text-success-foreground",
         "[&_[data-slot=alert-action]_[data-variant=ghost]]:hover:bg-success/10",
       ],
     },

@@ -55,9 +55,12 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            // ~65k verdicts is far more than a household resolves in a TTL window, and at roughly
-            // 120 bytes per entry it costs well under 16 MiB.
-            cache_capacity: 65_536,
+            // Each entry costs roughly 320 bytes, not the 120 originally assumed: the hostname is
+            // stored twice (once as the map key, once in the FIFO order queue), plus the verdict,
+            // an Instant, and per-allocation overhead. 16_384 entries is therefore ~5 MiB, which
+            // keeps the engine inside its documented 16 MiB resident budget on a 4 GB Pi. A
+            // household resolves far fewer distinct names than this within one TTL window.
+            cache_capacity: 16_384,
             cache_ttl: Duration::from_secs(6 * 60 * 60),
             queue_depth: 4_096,
         }
@@ -88,6 +91,8 @@ pub enum ObserveOutcome {
     Dropped,
     /// The classifier is switched off.
     Disabled,
+    /// The name is not a scoreable hostname (IP literal, single label, invalid characters).
+    Unscoreable,
 }
 
 /// The enforcement decision for a single query.
@@ -277,8 +282,16 @@ impl ClassifierEngine {
     ///
     /// This is the only engine call permitted on the DNS hot path.
     pub fn lookup(&self, host: &str) -> Option<Verdict> {
+        // Normalise here rather than trusting callers. The DNS path hands us a lowercased wire name
+        // that still carries a leading `www.`, but the model was trained on `www.`-stripped hosts,
+        // so scoring the raw name is train/serve skew: `www.ads.example` and `ads.example` would
+        // become two different feature vectors for the same site.
+        let Ok(host) = crate::normalize::normalize(host) else {
+            return None;
+        };
+        let host = host.as_str();
         let shard = &self.inner.shards[shard_index(host)];
-        let Ok(mut guard) = shard.lock() else {
+        let Ok(guard) = shard.lock() else {
             // A poisoned lock must degrade to "no opinion", never to a panic in the resolver.
             return None;
         };
@@ -293,8 +306,11 @@ impl ClassifierEngine {
                 Some(verdict)
             }
             Some(_) => {
-                // Expired: drop it so the next observe() re-queues.
-                guard.entries.remove(host);
+                // Expired. Deliberately left in place rather than removed: `order` holds exactly
+                // one record per key in `entries`, and removing here without touching `order` broke
+                // that invariant. The next insert would then push a second record for the same key,
+                // and evicting the stale one would delete the freshly scored verdict. An expired
+                // entry is never returned, and is overwritten on re-score or evicted by FIFO.
                 drop(guard);
                 self.inner
                     .counters
@@ -323,6 +339,12 @@ impl ClassifierEngine {
         if self.mode() == ClassifierMode::Off {
             return ObserveOutcome::Disabled;
         }
+        // Names that cannot be normalised (IP literals, single labels, invalid characters) are not
+        // scoreable and must not occupy queue slots.
+        let Ok(host) = crate::normalize::normalize(host) else {
+            return ObserveOutcome::Unscoreable;
+        };
+        let host = host.as_str();
         if self.lookup(host).is_some() {
             return ObserveOutcome::Cached;
         }
@@ -382,12 +404,18 @@ impl ClassifierEngine {
     ///
     /// For API handlers and the domain inspector only — never call this from the DNS path.
     pub fn score_now(&self, host: &str) -> Verdict {
-        self.inner.score(host)
+        match crate::normalize::normalize(host) {
+            Ok(normalised) => self.inner.score(&normalised),
+            Err(_) => self.inner.score(host),
+        }
     }
 
     /// Signed feature contributions behind a host's score.
     pub fn explain(&self, host: &str, top_k: usize) -> Vec<Contribution> {
-        self.inner.model.explain(host, top_k)
+        match crate::normalize::normalize(host) {
+            Ok(normalised) => self.inner.model.explain(&normalised, top_k),
+            Err(_) => self.inner.model.explain(host, top_k),
+        }
     }
 
     /// Currently active settings.
@@ -733,25 +761,83 @@ mod tests {
     }
 
     #[test]
-    fn expired_verdicts_are_evicted_on_lookup() {
+    fn expired_verdicts_are_not_returned() {
         let (engine, worker) = ClassifierEngine::new(
             ad_token_model(),
             Allowlist::builtin(),
             ClassifierSettings::default(),
             EngineConfig {
                 cache_capacity: 64,
-                cache_ttl: Duration::from_nanos(1),
+                cache_ttl: Duration::from_millis(20),
                 queue_depth: 8,
             },
         );
         engine.observe("ads.example.com");
         engine.drain_for_test(&worker.receiver);
-        std::thread::sleep(Duration::from_millis(2));
+        assert!(engine.lookup("ads.example.com").is_some());
+        std::thread::sleep(Duration::from_millis(30));
         assert_eq!(
             engine.lookup("ads.example.com"),
             None,
-            "expired verdict should be dropped"
+            "an expired verdict must never be returned"
         );
+    }
+
+    /// Re-scoring a name whose verdict expired must not evict the fresh verdict.
+    ///
+    /// Regression guard: `lookup` used to remove expired entries from the map while leaving their
+    /// record in the FIFO queue. The next insert pushed a second record for the same key, and
+    /// evicting the stale one deleted the newly scored verdict — so a busy cache silently settled
+    /// far below its configured capacity and kept re-scoring the same domains.
+    #[test]
+    fn expiry_then_rescore_keeps_the_fresh_verdict() {
+        let (engine, worker) = ClassifierEngine::new(
+            ad_token_model(),
+            Allowlist::builtin(),
+            ClassifierSettings::default(),
+            EngineConfig {
+                cache_capacity: SHARD_COUNT * 4,
+                cache_ttl: Duration::from_millis(30),
+                queue_depth: 64,
+            },
+        );
+
+        for round in 0..4 {
+            for index in 0..8 {
+                engine.observe(&format!("h{index}.example.com"));
+            }
+            engine.drain_for_test(&worker.receiver);
+            if round < 3 {
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+
+        for index in 0..8 {
+            let host = format!("h{index}.example.com");
+            assert!(
+                engine.lookup(&host).is_some(),
+                "{host} lost its fresh verdict to a stale queue record"
+            );
+        }
+    }
+
+    /// The FIFO queue must hold exactly one record per cached key; if it drifts, eviction starts
+    /// deleting live entries.
+    #[test]
+    fn order_queue_and_entry_map_stay_in_step() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        for index in 0..200 {
+            engine.observe(&format!("n{index}.example.com"));
+            engine.drain_for_test(&worker.receiver);
+        }
+        for shard in &engine.inner.shards {
+            let guard = shard.lock().expect("shard lock");
+            assert_eq!(
+                guard.entries.len(),
+                guard.order.len(),
+                "entries and order must hold one record per key"
+            );
+        }
     }
 
     #[test]
@@ -836,6 +922,42 @@ mod tests {
             stats.hook_panics, 2,
             "contained panics should be counted, not hidden"
         );
+    }
+
+    /// The DNS path hands the engine a raw wire name, not a normalised one. If the engine does not
+    /// normalise, `www.ads.example.com` and `ads.example.com` become different feature vectors for
+    /// the same site and neither matches how the model was trained.
+    #[test]
+    fn engine_normalises_before_scoring_and_caching() {
+        let (engine, worker) = engine(ClassifierMode::Monitor);
+        engine.observe("WWW.Ads.Example.COM.");
+        engine.drain_for_test(&worker.receiver);
+
+        // All four spellings must resolve to the same cached verdict.
+        let canonical = engine
+            .lookup("ads.example.com")
+            .expect("canonical form cached");
+        for spelling in [
+            "WWW.Ads.Example.COM.",
+            "www.ads.example.com",
+            "ads.example.com.",
+            "ADS.EXAMPLE.COM",
+        ] {
+            let verdict = engine.lookup(spelling).expect("every spelling should hit");
+            assert_eq!(
+                verdict.probability, canonical.probability,
+                "{spelling} diverged"
+            );
+        }
+        assert_eq!(engine.stats().scored, 1, "one site should be scored once");
+    }
+
+    #[test]
+    fn unscoreable_names_do_not_occupy_queue_slots() {
+        let (engine, _worker) = engine(ClassifierMode::Monitor);
+        assert_eq!(engine.observe("192.168.1.1"), ObserveOutcome::Unscoreable);
+        assert_eq!(engine.observe("localhost"), ObserveOutcome::Unscoreable);
+        assert_eq!(engine.lookup("192.168.1.1"), None);
     }
 
     #[test]

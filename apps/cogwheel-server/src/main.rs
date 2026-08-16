@@ -603,6 +603,11 @@ async fn main() -> Result<()> {
     );
     startup_counter.inc();
     let registry = Arc::new(registry);
+    // Readiness is reported per subsystem; each is marked as it genuinely comes up.
+    let readiness = Arc::new(cogwheel_api::Readiness::default());
+    // Storage is open and migrated by the time we get here -- `Storage::connect` applies migrations
+    // and now fails loudly if any of them error.
+    readiness.mark_storage_ready();
 
     let resolver = build_resolver(&config.upstream.servers)?;
     let classifier_settings = load_classifier_settings(&storage).await?;
@@ -718,11 +723,22 @@ async fn main() -> Result<()> {
             udp_bind_addr: config.server.dns_udp_bind_addr,
             tcp_bind_addr: config.server.dns_tcp_bind_addr,
         };
-        async move { runtime.serve(dns_config).await }
+        let readiness = Arc::clone(&readiness);
+        async move {
+            runtime
+                .serve_with_ready_signal(dns_config, move || {
+                    readiness.mark_dns_ready();
+                    tracing::info!("dns listeners bound");
+                })
+                .await
+        }
     });
 
     let app_state = ServerState {
-        api_state: ApiState { registry },
+        api_state: ApiState {
+            registry,
+            readiness: Arc::clone(&readiness),
+        },
         storage,
         dns_runtime,
         http_client,
@@ -752,8 +768,14 @@ async fn main() -> Result<()> {
             })
             .unwrap_or_default(),
     };
-    if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
-        tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
+    match warm_runtime_policy_catalog(&app_state).await {
+        Ok(()) => readiness.mark_policy_ready(),
+        Err(error) => {
+            // The node keeps serving -- an empty policy resolves everything rather than nothing --
+            // but it must not advertise itself as ready, or a rolling upgrade would send traffic to
+            // a node that is not actually filtering yet.
+            tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
+        }
     }
     sync_runtime_device_policies(&app_state).await?;
     let refresh_handle = tokio::spawn({
@@ -786,6 +808,38 @@ async fn main() -> Result<()> {
         .await
         .context("bind http listener")?;
 
+    // Graceful shutdown. Without this the process took the kernel default on SIGTERM and died
+    // instantly, dropping every in-flight DNS query and upstream request and severing open SSE
+    // streams. `docker stop` and `systemctl stop` both send SIGTERM, so this is the normal stop
+    // path for the appliance, not an edge case.
+    let shutdown = async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                // If the handler cannot be installed we still want the other arm to work, so park
+                // forever rather than resolving immediately and triggering a spurious shutdown.
+                Err(error) => {
+                    tracing::warn!(%error, "could not install SIGTERM handler");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            () = ctrl_c => tracing::info!("received SIGINT, shutting down"),
+            () = terminate => tracing::info!("received SIGTERM, shutting down"),
+        }
+    };
+
     tokio::select! {
         result = dns_handle => {
             result.context("dns task join failure")??;
@@ -793,11 +847,14 @@ async fn main() -> Result<()> {
         result = refresh_handle => {
             result.context("refresh task join failure")?;
         }
-        result = axum::serve(listener, app) => {
+        // `with_graceful_shutdown` stops accepting new connections on the signal and waits for
+        // in-flight requests to finish before returning.
+        result = axum::serve(listener, app).with_graceful_shutdown(shutdown) => {
             result.context("http server failure")?;
         }
     }
 
+    tracing::info!("shutdown complete");
     Ok(())
 }
 
@@ -858,9 +915,36 @@ fn build_http_app(app_state: ServerState) -> Router {
     let app = if let Some(web_dist_dir) = resolve_web_dist_dir() {
         tracing::info!(path = %web_dist_dir.display(), "serving bundled web assets");
         let index_path = web_dist_dir.join("index.html");
-        api_app.fallback_service(
-            ServeDir::new(web_dist_dir).not_found_service(ServeFile::new(index_path)),
-        )
+        // `not_found_service` serves index.html but keeps the 404 status, so every client-side
+        // route (/activity, /devices, ...) returned "404 Not Found" with the app in the body.
+        // Browsers render it, but uptime probes, `curl -f`, proxies and crawlers all treat a deep
+        // link as broken. Rewrite the status so a served SPA route reports success.
+        let spa = ServeDir::new(web_dist_dir).not_found_service(ServeFile::new(index_path));
+        api_app.fallback_service(tower::service_fn(
+            move |request: axum::http::Request<axum::body::Body>| {
+                let spa = spa.clone();
+                // Only a client-side route gets its status rewritten. A missing asset must stay a
+                // real 404: rewriting those too would make every typo'd bundle path return the HTML
+                // shell with 200, which hides broken deploys from caches and monitoring alike.
+                let is_spa_route = {
+                    let path = request.uri().path();
+                    !path.starts_with("/assets/")
+                        && !path
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|segment| segment.contains('.'))
+                };
+                async move {
+                    let mut response = tower::ServiceExt::oneshot(spa, request)
+                        .await
+                        .map(axum::response::IntoResponse::into_response)?;
+                    if is_spa_route && response.status() == axum::http::StatusCode::NOT_FOUND {
+                        *response.status_mut() = axum::http::StatusCode::OK;
+                    }
+                    Ok::<_, std::convert::Infallible>(response)
+                }
+            },
+        ))
     } else {
         tracing::warn!("web assets not found; serving API routes only");
         api_app
@@ -2948,12 +3032,21 @@ async fn restore_data(
     let device_count = data.devices.len();
     let size_bytes = serde_json::to_string(&data).map(|s| s.len()).unwrap_or(0);
 
+    let mut restore_failures: Vec<String> = Vec::new();
+    let mut restored_sources = 0usize;
     for source in &data.sources {
-        let _ = state.storage.insert_source(source).await;
+        match state.storage.insert_source(source).await {
+            Ok(()) => restored_sources += 1,
+            Err(error) => restore_failures.push(format!("source {}: {error}", source.name)),
+        }
     }
 
+    let mut restored_devices = 0usize;
     for device in &data.devices {
-        let _ = state.storage.upsert_device(device).await;
+        match state.storage.upsert_device(device).await {
+            Ok(()) => restored_devices += 1,
+            Err(error) => restore_failures.push(format!("device {}: {error}", device.ip_address)),
+        }
     }
 
     if let Ok(mut notifications) = state.notification_settings.write() {
@@ -2979,14 +3072,37 @@ async fn restore_data(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let message = format!(
-        "Restored {} sources, {} devices, classifier and notification settings",
-        source_count, device_count
-    );
+    // Report what actually landed. Previously every write result was discarded and the response
+    // claimed success unconditionally, so a restore onto a node with a locked database or a full
+    // disk told the operator it had worked -- and wrote that claim into the audit log.
+    let success = restore_failures.is_empty();
+    let message = if success {
+        format!(
+            "Restored {} sources, {} devices, classifier and notification settings",
+            restored_sources, restored_devices
+        )
+    } else {
+        let shown = restore_failures.len().min(3);
+        format!(
+            "Restored {}/{} sources and {}/{} devices; {} write(s) failed: {}",
+            restored_sources,
+            source_count,
+            restored_devices,
+            device_count,
+            restore_failures.len(),
+            restore_failures[..shown].join("; ")
+        )
+    };
+    if !success {
+        tracing::error!(
+            failures = restore_failures.len(),
+            "backup restore partially failed"
+        );
+    }
 
     Ok(Json(ApiEnvelope {
         data: BackupResult {
-            success: true,
+            success,
             message,
             size_bytes,
         },

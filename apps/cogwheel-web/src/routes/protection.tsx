@@ -26,7 +26,7 @@ import { TextField } from "@/components/app/text-field";
 import { FieldRow } from "@/components/app/form-field";
 import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
-import { EmptyState } from "@/components/app/states";
+import { AsyncRegion, EmptyState } from "@/components/app/states";
 
 const TABS = ["blocklists", "services", "profiles"] as const;
 type TabId = (typeof TABS)[number];
@@ -486,7 +486,7 @@ function ServicesPane() {
 /* -------------------------------------------------------------------------- */
 
 function ProfilesPane() {
-  const { data, busy, mutate } = useCogwheel();
+  const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const profiles = data.settings.block_profiles;
 
   const [draft, setDraft] = React.useState<BlockProfileRecord>(emptyBlockProfileDraft);
@@ -599,13 +599,25 @@ function ProfilesPane() {
         description="Reusable bundles of lists and exceptions for different devices and routines."
         title="Profiles"
       >
-        {profiles.length === 0 ? (
-          <EmptyState
-            description="Create one to group the lists a device should use, plus the exceptions it needs."
-            icon={ShieldIcon}
-            title="No saved profiles yet"
-          />
-        ) : (
+        {/* `data.settings` starts life as the empty default in the provider, so
+            without these guards a cold load and a failed fetch both render as
+            "this household has no profiles". */}
+        <AsyncRegion
+          empty={
+            <EmptyState
+              description="Create one to group the lists a device should use, plus the exceptions it needs."
+              icon={ShieldIcon}
+              title="No saved profiles yet"
+            />
+          }
+          error={error}
+          errorTitle="Could not load block profiles"
+          isEmpty={profiles.length === 0}
+          loading={phase === "loading"}
+          onRetry={() => void reload()}
+          skeleton="text"
+          skeletonRows={3}
+        >
           <ul className="flex flex-col gap-1.5">
             {profiles.map((profile) => {
               const active = !creating && profile.id === draft.id;
@@ -639,7 +651,7 @@ function ProfilesPane() {
               );
             })}
           </ul>
-        )}
+        </AsyncRegion>
       </SectionCard>
 
       <SectionCard

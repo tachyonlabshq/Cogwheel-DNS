@@ -89,10 +89,16 @@ pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
     }
 }
 
+/// Fetch a source over HTTP(S) and parse it into rules.
+///
+/// # Errors
+///
+/// Returns [`FetchError::TooLarge`] if the body exceeds [`MAX_SOURCE_BODY_BYTES`], or
+/// [`FetchError::Http`] for transport and status failures.
 pub async fn fetch_and_parse_source(
     client: &Client,
     source: SourceDefinition,
-) -> Result<ParsedSource, reqwest::Error> {
+) -> Result<ParsedSource, FetchError> {
     let body = fetch_source_body(client, &source.url).await?;
     Ok(parse_source(source, &body))
 }
@@ -216,17 +222,93 @@ pub fn build_policy_engine(
     PolicyEngine::new(compile_ruleset(parsed, protected_domains, block_mode))
 }
 
-async fn fetch_source_body(client: &Client, url: &Url) -> Result<String, reqwest::Error> {
+/// Largest blocklist body accepted from a remote source.
+///
+/// Blocklists are attacker-influenced input: the operator supplies a URL, but whoever controls that
+/// URL controls the payload. Measured before this bound existed, a 44 MB list drove resident memory
+/// from 27 MB to 695 MB — roughly 16x amplification, because the body string, the parsed rules,
+/// verification's copy of them and the compiled artifact all coexist. A 616 MB body peaked at 10 GB
+/// and would have been an OOM kill on the 4 GB Raspberry Pi this product targets.
+///
+/// 32 MiB comfortably exceeds the largest lists in real use (StevenBlack's hosts file is ~3 MB,
+/// HaGeZi Pro ~5 MB) while keeping worst-case amplification inside the budget of the smallest
+/// supported device.
+pub const MAX_SOURCE_BODY_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Why a source body was rejected before parsing.
+#[derive(Debug)]
+pub enum FetchError {
+    /// Transport or status failure.
+    Http(reqwest::Error),
+    /// The body exceeded [`MAX_SOURCE_BODY_BYTES`].
+    TooLarge {
+        /// Bytes read before the limit tripped, or the advertised length.
+        bytes: u64,
+        /// The limit that was exceeded.
+        limit: u64,
+    },
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(error) => write!(f, "{error}"),
+            Self::TooLarge { bytes, limit } => write!(
+                f,
+                "blocklist body of {bytes} bytes exceeds the {limit} byte limit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::TooLarge { .. } => None,
+        }
+    }
+}
+
+impl From<reqwest::Error> for FetchError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error)
+    }
+}
+
+/// Fetch a source body, refusing anything over [`MAX_SOURCE_BODY_BYTES`].
+///
+/// The body is streamed and the running total checked per chunk, so an oversized or
+/// `Content-Length`-lying response is abandoned mid-transfer rather than buffered in full.
+async fn fetch_source_body(client: &Client, url: &Url) -> Result<String, FetchError> {
     match url.scheme() {
         "data" => Ok(parse_data_url(url)),
         _ => {
-            client
-                .get(url.clone())
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await
+            let response = client.get(url.clone()).send().await?.error_for_status()?;
+
+            // Reject early when the server is honest about an oversized body.
+            if let Some(length) = response.content_length()
+                && length > MAX_SOURCE_BODY_BYTES
+            {
+                return Err(FetchError::TooLarge {
+                    bytes: length,
+                    limit: MAX_SOURCE_BODY_BYTES,
+                });
+            }
+
+            // Content-Length may be absent or a lie, so enforce the bound while streaming.
+            let mut body = Vec::with_capacity(64 * 1024);
+            let mut response = response;
+            while let Some(chunk) = response.chunk().await? {
+                if body.len() as u64 + chunk.len() as u64 > MAX_SOURCE_BODY_BYTES {
+                    return Err(FetchError::TooLarge {
+                        bytes: body.len() as u64 + chunk.len() as u64,
+                        limit: MAX_SOURCE_BODY_BYTES,
+                    });
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(String::from_utf8_lossy(&body).into_owned())
         }
     }
 }

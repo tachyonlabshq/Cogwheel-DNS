@@ -110,10 +110,13 @@ export const ToastItem = (props: ToastItemProps) => {
       <div className="flex items-start gap-1.5">
         <div
           className={cn(
-            "in-data-[type=warning]:text-warning",
-            "in-data-[type=success]:text-success",
-            "in-data-[type=error]:text-destructive",
-            "in-data-[type=info]:text-info",
+            // The 700/300 partners, not the 400 accents: a red-400 glyph on
+            // --popover is 2.89:1 and a yellow-400 one 1.36:1, under the 3:1
+            // §7 asks of a meaningful graphic.
+            "in-data-[type=warning]:text-warning-foreground",
+            "in-data-[type=success]:text-success-foreground",
+            "in-data-[type=error]:text-destructive-foreground",
+            "in-data-[type=info]:text-info-foreground",
             "[&_svg]:pointer-events-none [&_svg]:h-lh [&_svg]:w-4 [&_svg]:shrink-0"
           )}
           data-slot="toast-icon"

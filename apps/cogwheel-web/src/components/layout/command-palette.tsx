@@ -36,6 +36,7 @@ import {
   CommandShortcut,
 } from "@/components/ui/command";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
+import { ConfirmDialog } from "@/components/app/confirm-dialog";
 
 type PaletteItem = {
   value: string;
@@ -63,6 +64,10 @@ export function CommandPalette({
   const { inspect } = useDomainInspector();
   const { preference, setPreference } = useTheme();
   const [query, setQuery] = React.useState("");
+  // Pausing from the palette is one keystroke away from disabling filtering for
+  // the whole network, so it goes through the same guard as the sidebar control
+  // rather than firing on Enter.
+  const [pendingPause, setPendingPause] = React.useState<number | null>(null);
 
   const close = React.useCallback(() => {
     onOpenChange(false);
@@ -90,7 +95,7 @@ export function CommandPalette({
         group: "Protection",
         hint: "Network-wide",
         icon: PauseIcon,
-        perform: () => void pause(minutes),
+        perform: () => setPendingPause(minutes),
       });
     }
 
@@ -182,7 +187,7 @@ export function CommandPalette({
     });
 
     return entries;
-  }, [data.settings.blocklists, data.settings.devices, mutate, navigate, onShowShortcuts, pause, preference, reload, resume, setPreference]);
+  }, [data.settings.blocklists, data.settings.devices, mutate, navigate, onShowShortcuts, preference, reload, resume, setPreference]);
 
   const filtered = React.useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -237,56 +242,73 @@ export function CommandPalette({
   }, [filtered]);
 
   return (
-    <CommandDialog onOpenChange={(details) => (details.open ? onOpenChange(true) : close())} open={open}>
-      <CommandDialogContent
-        description="Jump to a screen, run an action, or inspect a domain."
-        title="Command palette"
-      >
-        <Command
-          collection={collection}
-          inputValue={query}
-          onInputValueChange={(details) => setQuery(details.inputValue)}
-          onValueChange={(details) => {
-            const selected = filtered.find((item) => item.value === details.value[0]);
-            if (!selected) return;
-            close();
-            selected.perform();
-          }}
+    <>
+      <CommandDialog onOpenChange={(details) => (details.open ? onOpenChange(true) : close())} open={open}>
+        <CommandDialogContent
+          description="Jump to a screen, run an action, or inspect a domain."
+          title="Command palette"
         >
-          <CommandInput placeholder="Search screens, devices, blocklists or a domain…" />
-          <CommandContent>
-            <CommandList>
-              <CommandEmpty>Nothing matches that.</CommandEmpty>
-              {grouped.map(([group, entries]) => (
-                <CommandGroup heading={group} key={group}>
-                  {entries.map((entry) => (
-                    <CommandItem item={entry} key={entry.value}>
-                      <entry.icon aria-hidden />
-                      <span className="flex-1 truncate">{entry.label}</span>
-                      {entry.hint ? (
-                        <CommandShortcut className="truncate">{entry.hint}</CommandShortcut>
-                      ) : null}
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              ))}
-            </CommandList>
-          </CommandContent>
-          <CommandFooter>
-            <KbdGroup>
-              <Kbd>↑</Kbd>
-              <Kbd>↓</Kbd>
-              <span>navigate</span>
-            </KbdGroup>
-            <KbdGroup>
-              <Kbd>↵</Kbd>
-              <span>run</span>
-              <Kbd>esc</Kbd>
-              <span>close</span>
-            </KbdGroup>
-          </CommandFooter>
-        </Command>
-      </CommandDialogContent>
-    </CommandDialog>
+          <Command
+            collection={collection}
+            inputValue={query}
+            onInputValueChange={(details) => setQuery(details.inputValue)}
+            onValueChange={(details) => {
+              const selected = filtered.find((item) => item.value === details.value[0]);
+              if (!selected) return;
+              close();
+              selected.perform();
+            }}
+          >
+            <CommandInput placeholder="Search screens, devices, blocklists or a domain…" />
+            <CommandContent>
+              <CommandList>
+                <CommandEmpty>Nothing matches that.</CommandEmpty>
+                {grouped.map(([group, entries]) => (
+                  <CommandGroup heading={group} key={group}>
+                    {entries.map((entry) => (
+                      <CommandItem item={entry} key={entry.value}>
+                        <entry.icon aria-hidden />
+                        <span className="flex-1 truncate">{entry.label}</span>
+                        {entry.hint ? (
+                          <CommandShortcut className="truncate">{entry.hint}</CommandShortcut>
+                        ) : null}
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                ))}
+              </CommandList>
+            </CommandContent>
+            <CommandFooter>
+              <KbdGroup>
+                <Kbd>↑</Kbd>
+                <Kbd>↓</Kbd>
+                <span>navigate</span>
+              </KbdGroup>
+              <KbdGroup>
+                <Kbd>↵</Kbd>
+                <span>run</span>
+                <Kbd>esc</Kbd>
+                <span>close</span>
+              </KbdGroup>
+            </CommandFooter>
+          </Command>
+        </CommandDialogContent>
+      </CommandDialog>
+
+      <ConfirmDialog
+        confirmLabel={`Pause for ${pendingPause ?? 0} minutes`}
+        consequence="Every device on the network resolves unfiltered until the window expires or you resume manually. The pause is held in memory, so a restart of the appliance also ends it."
+        description={`Blocking and classification stop for ${pendingPause ?? 0} minutes across the whole network, not just this browser.`}
+        destructive
+        onConfirm={async () => {
+          if (pendingPause !== null) await pause(pendingPause);
+        }}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setPendingPause(null);
+        }}
+        open={pendingPause !== null}
+        title="Pause protection?"
+      />
+    </>
   );
 }

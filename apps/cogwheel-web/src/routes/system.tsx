@@ -36,6 +36,7 @@ import {
   formatNanosAsMs,
   formatPercent,
   formatRelative,
+  shortHash,
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { notify } from "@/lib/toast";
@@ -108,7 +109,7 @@ export function SystemScreen() {
 /* -------------------------------------------------------------------------- */
 
 function DiagnosticsPane() {
-  const { data, busy, mutate } = useCogwheel();
+  const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const health = data.dashboard.runtime_health;
   const snapshot = health.snapshot;
   const latency = data.latencyBudget;
@@ -124,6 +125,7 @@ function DiagnosticsPane() {
   const [drill, setDrill] = React.useState<ResilienceDrill>("upstream-outage");
   const [drillResult, setDrillResult] = React.useState<ResilienceDrillResult | null>(null);
   const [confirmExitNode, setConfirmExitNode] = React.useState(false);
+  const [confirmTailscaleRollback, setConfirmTailscaleRollback] = React.useState(false);
 
   const latencyColumns: Column<LatencyBudgetCheck>[] = [
     { key: "label", header: "Path", render: (row) => row.label },
@@ -210,8 +212,16 @@ function DiagnosticsPane() {
           />
           <StatTile label="Fallback served" value={formatCount(snapshot.fallback_served_total)} />
           <StatTile label="Cache hits" value={formatCount(snapshot.cache_hits_total)} />
-          <StatTile label="CNAME uncloaks" value={formatCount(snapshot.cname_uncloaks_total)} />
-          <StatTile label="CNAME blocks" value={formatCount(snapshot.cname_blocks_total)} />
+          <StatTile
+            hint="A tracker can hide behind an alias on the site's own domain. Uncloaking follows the alias to the real destination so the filter judges where the request actually goes."
+            label="CNAME uncloaks"
+            value={formatCount(snapshot.cname_uncloaks_total)}
+          />
+          <StatTile
+            hint="Queries blocked only after following that alias. The hostname asked for was on no list; the address it pointed at was."
+            label="CNAME blocks"
+            value={formatCount(snapshot.cname_blocks_total)}
+          />
           <StatTile
             delta={`${formatCount(snapshot.classifier_latency_samples)} samples`}
             label="Classifier latency"
@@ -253,6 +263,9 @@ function DiagnosticsPane() {
             title: "No latency samples yet",
             description: "Checks appear once the resolver has answered enough queries to average.",
           }}
+          error={error}
+          loading={phase === "loading"}
+          onRetry={() => void reload()}
           rowKey={(row) => row.label}
           rows={latency.checks}
         />
@@ -414,15 +427,7 @@ function DiagnosticsPane() {
             </Button>
             <Button
               isLoading={busy === "tailscale-rollback"}
-              onClick={() =>
-                void mutate({
-                  key: "tailscale-rollback",
-                  action: () => api.tailscaleRollback(),
-                  successTitle: "Exit node rolled back",
-                  successDetail: (result) => result.message,
-                  failureTitle: "Could not roll back",
-                })
-              }
+              onClick={() => setConfirmTailscaleRollback(true)}
               variant="ghost"
             >
               Roll back
@@ -536,6 +541,27 @@ function DiagnosticsPane() {
         onOpenChange={setConfirmExitNode}
         open={confirmExitNode}
         title="Reconfigure Tailscale networking?"
+      />
+
+      <ConfirmDialog
+        confirmLabel="Roll back exit-node settings"
+        consequence="This runs `tailscale up` on the appliance and reconfigures host networking, exactly like advertising the exit node does. Whatever the appliance saved as the previous value is what gets restored; there is no preview of it."
+        description={`Exit-node advertising for ${
+          tailscale.hostname ?? "this node"
+        } will be reset to the value saved before it was last changed.`}
+        destructive
+        onConfirm={async () => {
+          await mutate({
+            key: "tailscale-rollback",
+            action: () => api.tailscaleRollback(),
+            successTitle: "Exit node rolled back",
+            successDetail: (result) => result.message,
+            failureTitle: "Could not roll back",
+          });
+        }}
+        onOpenChange={setConfirmTailscaleRollback}
+        open={confirmTailscaleRollback}
+        title="Roll back Tailscale networking?"
       />
     </div>
   );
@@ -989,6 +1015,7 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
   const { data, busy, mutate } = useCogwheel();
   const [filter, setFilter] = React.useState<AuditFilterId>("all");
   const [expanded, setExpanded] = React.useState<string | null>(null);
+  const [confirmRollback, setConfirmRollback] = React.useState(false);
 
   const events = useAsync<AuditEvent[]>("audit-events", (signal) => api.auditEvents({ signal }));
   const rows = React.useMemo(
@@ -1017,13 +1044,10 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
           failureTitle: "Could not refresh sources",
         });
       case "rollback-ruleset":
-        return mutate({
-          key: "rollback-ruleset",
-          action: () => api.rollbackRuleset(),
-          successTitle: "Rollback completed",
-          successDetail: (result) => `Restored ruleset ${result.hash.slice(0, 12)}.`,
-          failureTitle: "Could not roll back",
-        });
+        // Guarded exactly like the identical action on Insights, which names the
+        // ruleset being replaced before it swaps the appliance's policy out.
+        setConfirmRollback(true);
+        return Promise.resolve(null);
       case "filter-notifications":
         setFilter("notifications");
         onFilterNotifications();
@@ -1172,6 +1196,27 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
           </pre>
         ) : null}
       </SectionCard>
+
+      <ConfirmDialog
+        confirmLabel="Roll back ruleset"
+        consequence="The previous ruleset is reactivated and the policy catalog is rebuilt, which re-fetches every enabled source over HTTP."
+        description={`The active ruleset ${
+          data.dashboard.active_ruleset ? shortHash(data.dashboard.active_ruleset.hash) : "(none)"
+        } will be replaced by the previously active one.`}
+        destructive
+        onConfirm={async () => {
+          await mutate({
+            key: "rollback-ruleset",
+            action: () => api.rollbackRuleset(),
+            successTitle: "Rollback completed",
+            successDetail: (result) => `Restored ruleset ${shortHash(result.hash)}.`,
+            failureTitle: "Could not roll back",
+          });
+        }}
+        onOpenChange={setConfirmRollback}
+        open={confirmRollback}
+        title="Roll back to the previous ruleset?"
+      />
     </div>
   );
 }

@@ -270,17 +270,39 @@ impl DnsRuntime {
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
-        let udp = tokio::spawn(self.clone().serve_udp(config.udp_bind_addr));
-        let tcp = tokio::spawn(self.clone().serve_tcp(config.tcp_bind_addr));
+        self.serve_with_ready_signal(config, || {}).await
+    }
+
+    /// Serve DNS, invoking `on_ready` once both listeners are bound.
+    ///
+    /// The callback is what lets `/health/ready` report a real signal instead of returning 200 the
+    /// moment the process starts: binding is the point at which this node can actually answer.
+    pub async fn serve_with_ready_signal<F>(
+        self: Arc<Self>,
+        config: DnsRuntimeConfig,
+        on_ready: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        // Bind before spawning the accept loops so a bind failure is reported as a startup error
+        // rather than surfacing later as a dead task.
+        let udp_socket = UdpSocket::bind(config.udp_bind_addr)
+            .await
+            .context("bind udp socket")?;
+        let tcp_listener = TcpListener::bind(config.tcp_bind_addr)
+            .await
+            .context("bind tcp listener")?;
+        on_ready();
+
+        let udp = tokio::spawn(self.clone().accept_udp(udp_socket));
+        let tcp = tokio::spawn(self.clone().accept_tcp(tcp_listener));
         udp.await??;
         tcp.await??;
         Ok(())
     }
 
-    async fn serve_udp(self: Arc<Self>, bind_addr: SocketAddr) -> Result<()> {
-        let socket = UdpSocket::bind(bind_addr)
-            .await
-            .context("bind udp socket")?;
+    async fn accept_udp(self: Arc<Self>, socket: UdpSocket) -> Result<()> {
         let mut buffer = [0u8; 4096];
         loop {
             let (size, peer) = socket.recv_from(&mut buffer).await?;
@@ -296,10 +318,7 @@ impl DnsRuntime {
         }
     }
 
-    async fn serve_tcp(self: Arc<Self>, bind_addr: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(bind_addr)
-            .await
-            .context("bind tcp listener")?;
+    async fn accept_tcp(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
             let runtime = self.clone();

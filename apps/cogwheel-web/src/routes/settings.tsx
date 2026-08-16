@@ -20,7 +20,8 @@ import { SelectField } from "@/components/app/select-field";
 import { TextField } from "@/components/app/text-field";
 import { FieldRow, FormField } from "@/components/app/form-field";
 import { StatusIndicator, StatusPill } from "@/components/app/status-indicator";
-import { EmptyState, NoticeBanner } from "@/components/app/states";
+import { AsyncRegion, EmptyState, NoticeBanner } from "@/components/app/states";
+import { ConfirmDialog } from "@/components/app/confirm-dialog";
 
 const TABS = ["alerts", "integrations", "guard"] as const;
 type TabId = (typeof TABS)[number];
@@ -72,7 +73,7 @@ export function SettingsScreen() {
 /* -------------------------------------------------------------------------- */
 
 function AlertsPane() {
-  const { data, busy, mutate } = useCogwheel();
+  const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const notifications = data.settings.notifications;
   const health = data.dashboard.notification_health;
 
@@ -89,6 +90,12 @@ function AlertsPane() {
     data.settings.notification_test_presets,
   );
   const [presetName, setPresetName] = React.useState("");
+  // Deleting a preset writes the shortened list straight to the appliance and
+  // there is no undo, so it goes through the house guard like every other
+  // server-side deletion.
+  const [pendingDeletePreset, setPendingDeletePreset] = React.useState<NotificationTestPreset | null>(
+    null,
+  );
 
   // The form is a draft over server state; re-sync whenever the server's copy
   // changes underneath us (another operator, or a sync import).
@@ -136,8 +143,9 @@ function AlertsPane() {
           </Button>
           <Button
             aria-label={`Delete preset ${row.name}`}
-            onClick={() => void savePresets(presets.filter((preset) => preset.name !== row.name))}
+            onClick={() => setPendingDeletePreset(row)}
             size="icon-sm"
+            title={`Delete preset ${row.name}`}
             variant="ghost"
           >
             <Trash2Icon aria-hidden />
@@ -350,10 +358,32 @@ function AlertsPane() {
             title: "No presets saved",
             description: "Fill in a test above and save it as a preset to re-run it later.",
           }}
+          error={error}
+          loading={phase === "loading"}
+          onRetry={() => void reload()}
           rowKey={(row) => row.name}
           rows={presets}
         />
       </SectionCard>
+
+      <ConfirmDialog
+        confirmLabel="Delete preset"
+        consequence="The remaining presets are written back to the appliance immediately. There is no undo."
+        description={`"${pendingDeletePreset?.name ?? ""}" (${
+          pendingDeletePreset?.domain ?? ""
+        } as ${pendingDeletePreset?.device_name ?? ""}) will be removed from the saved test presets.`}
+        destructive
+        onConfirm={async () => {
+          if (!pendingDeletePreset) return;
+          const target = pendingDeletePreset;
+          await savePresets(presets.filter((preset) => preset.name !== target.name));
+        }}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeletePreset(null);
+        }}
+        open={pendingDeletePreset !== null}
+        title={`Delete preset ${pendingDeletePreset?.name ?? ""}?`}
+      />
     </div>
   );
 }
@@ -361,7 +391,7 @@ function AlertsPane() {
 /* -------------------------------------------------------------------------- */
 
 function IntegrationsPane() {
-  const { data, busy, mutate, patch } = useCogwheel();
+  const { data, phase, error, busy, mutate, patch, reload } = useCogwheel();
   const threatIntel = data.threatIntel;
   const federated = data.federatedLearning;
 
@@ -403,13 +433,21 @@ function IntegrationsPane() {
         description="Feed endpoints the appliance would consult. Nothing fetches them yet."
         title="Threat intelligence"
       >
-        {threatIntel.providers.length === 0 ? (
-          <EmptyState
-            description="The appliance did not report any threat intelligence providers."
-            icon={Trash2Icon}
-            title="No providers configured"
-          />
-        ) : (
+        <AsyncRegion
+          empty={
+            <EmptyState
+              description="The appliance did not report any threat intelligence providers."
+              icon={Trash2Icon}
+              title="No providers configured"
+            />
+          }
+          error={error}
+          errorTitle="Could not load threat intelligence providers"
+          isEmpty={threatIntel.providers.length === 0}
+          loading={phase === "loading"}
+          onRetry={() => void reload()}
+          skeletonRows={3}
+        >
           <ul className="flex flex-col gap-3">
             {threatIntel.providers.map((provider) => (
               <li className="rounded-xl border border-border p-4" key={provider.id}>
@@ -488,7 +526,7 @@ function IntegrationsPane() {
               </li>
             ))}
           </ul>
-        )}
+        </AsyncRegion>
 
         {threatIntel.recommendations.length > 0 ? (
           <ul className="mt-4 space-y-1">

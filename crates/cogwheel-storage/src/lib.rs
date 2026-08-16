@@ -656,17 +656,49 @@ impl Storage {
     }
 }
 
+/// Whether a migration error just means "this migration is already applied".
+///
+/// Migrations 0002+ are additive `ALTER TABLE ADD COLUMN` / `CREATE ... IF NOT EXISTS` batches with
+/// no version ledger, so re-running them on an up-to-date database is expected to fail in exactly
+/// these ways. Everything else -- a full disk, a locked database, a genuine SQL error -- is a real
+/// failure that must stop startup rather than leave the server running against a schema that is
+/// missing tables or columns, turning every dependent query into an opaque 500 later.
+fn is_already_applied(error: &rusqlite::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("duplicate column name")
+        || message.contains("already exists")
+        || message.contains("duplicate index")
+}
+
 fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     connection.execute_batch(MIGRATION_0001)?;
-    let _ = connection.execute_batch(MIGRATION_0002);
-    let _ = connection.execute_batch(MIGRATION_0003);
-    let _ = connection.execute_batch(MIGRATION_0004);
-    let _ = connection.execute_batch(MIGRATION_0005);
-    let _ = connection.execute_batch(MIGRATION_0006);
-    let _ = connection.execute_batch(MIGRATION_0007);
-    let _ = connection.execute_batch(MIGRATION_0008);
-    let _ = connection.execute_batch(MIGRATION_0009);
-    let _ = connection.execute_batch(MIGRATION_0010);
+
+    const ADDITIVE_MIGRATIONS: [(&str, &str); 9] = [
+        ("0002", MIGRATION_0002),
+        ("0003", MIGRATION_0003),
+        ("0004", MIGRATION_0004),
+        ("0005", MIGRATION_0005),
+        ("0006", MIGRATION_0006),
+        ("0007", MIGRATION_0007),
+        ("0008", MIGRATION_0008),
+        ("0009", MIGRATION_0009),
+        ("0010", MIGRATION_0010),
+    ];
+
+    for (name, sql) in ADDITIVE_MIGRATIONS {
+        match connection.execute_batch(sql) {
+            Ok(()) => {}
+            Err(error) if is_already_applied(&error) => {
+                tracing::debug!(migration = name, "migration already applied");
+            }
+            Err(error) => {
+                tracing::error!(migration = name, %error, "migration failed");
+                return Err(StorageError::Internal(format!(
+                    "migration {name} failed: {error}"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,6 +248,74 @@ impl AppConfig {
 #[derive(Debug, Clone)]
 pub struct ApiState {
     pub registry: Arc<Registry>,
+    /// Subsystem readiness, reported by `/health/ready`.
+    pub readiness: Arc<Readiness>,
+}
+
+/// Tracks whether each subsystem required to answer real traffic has come up.
+///
+/// Liveness and readiness must not be the same signal. `/health/ready` previously returned 200 the
+/// instant axum bound its listener, which made it strictly weaker than useless: an orchestrator
+/// could not tell "the process exists" from "this node can actually resolve DNS", so a rolling
+/// upgrade would shift traffic to a node whose blocklists had not compiled yet.
+#[derive(Debug, Default)]
+pub struct Readiness {
+    storage: AtomicBool,
+    policy: AtomicBool,
+    dns_listeners: AtomicBool,
+}
+
+impl Readiness {
+    /// Storage is open and its migrations have applied.
+    pub fn mark_storage_ready(&self) {
+        self.storage.store(true, Ordering::Release);
+    }
+
+    /// An initial policy artifact has been compiled and installed in the runtime.
+    pub fn mark_policy_ready(&self) {
+        self.policy.store(true, Ordering::Release);
+    }
+
+    /// Both DNS listeners are bound and accepting.
+    pub fn mark_dns_ready(&self) {
+        self.dns_listeners.store(true, Ordering::Release);
+    }
+
+    /// Whether every subsystem is up.
+    pub fn is_ready(&self) -> bool {
+        self.storage.load(Ordering::Acquire)
+            && self.policy.load(Ordering::Acquire)
+            && self.dns_listeners.load(Ordering::Acquire)
+    }
+
+    /// Per-subsystem detail, so a failing probe says which part is not up.
+    pub fn detail(&self) -> ReadinessDetail {
+        ReadinessDetail {
+            storage: self.storage.load(Ordering::Acquire),
+            policy: self.policy.load(Ordering::Acquire),
+            dns_listeners: self.dns_listeners.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// Per-subsystem readiness breakdown.
+#[derive(Debug, Serialize)]
+pub struct ReadinessDetail {
+    /// Storage open and migrated.
+    pub storage: bool,
+    /// Initial ruleset compiled and installed.
+    pub policy: bool,
+    /// UDP and TCP DNS listeners bound.
+    pub dns_listeners: bool,
+}
+
+/// Body of a readiness probe.
+#[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    /// `ready` or `starting`.
+    pub status: &'static str,
+    /// Which subsystems are up.
+    pub subsystems: ReadinessDetail,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,10 +362,25 @@ async fn live() -> Json<ApiEnvelope<HealthResponse>> {
     })
 }
 
-async fn ready() -> Json<ApiEnvelope<HealthResponse>> {
-    Json(ApiEnvelope {
-        data: HealthResponse { status: "ready" },
-    })
+/// Readiness probe.
+///
+/// Returns 503 until every subsystem is up, so an orchestrator or the container healthcheck can
+/// distinguish "starting" from "serving".
+async fn ready(State(state): State<ApiState>) -> Response {
+    let detail = state.readiness.detail();
+    let ready = state.readiness.is_ready();
+    let body = Json(ApiEnvelope {
+        data: ReadinessResponse {
+            status: if ready { "ready" } else { "starting" },
+            subsystems: detail,
+        },
+    });
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, body).into_response()
 }
 
 async fn metrics(State(state): State<ApiState>) -> Result<Response, ApiError> {

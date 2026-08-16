@@ -18,8 +18,8 @@ const fieldVariants = tv({
     "group/field",
     "w-full",
     "flex gap-2",
-    "data-invalid:text-destructive",
-    "dark:data-invalid:text-destructive-foreground",
+    // The 700/300 partner in both themes — red-400 as text fails AA on white.
+    "data-invalid:text-destructive-foreground",
   ],
   variants: {
     orientation: {
@@ -185,8 +185,7 @@ export const FieldRequiredIndicator = (
     <ArkField.RequiredIndicator
       aria-hidden
       className={cn(
-        "select-none text-destructive text-sm",
-        "dark:text-destructive-foreground",
+        "select-none text-destructive-foreground text-sm",
         className
       )}
       data-slot="field-required-indicator"
@@ -293,8 +292,7 @@ export const FieldError = (
   return (
     <ArkField.ErrorText
       className={cn(
-        "font-normal text-destructive text-sm",
-        "dark:text-destructive-foreground",
+        "font-normal text-destructive-foreground text-sm",
         className
       )}
       data-slot="field-error"

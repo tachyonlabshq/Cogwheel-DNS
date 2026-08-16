@@ -18,10 +18,12 @@ export const inputVariants = tv({
     "file:font-medium file:text-foreground file:text-sm",
     "transition-[color,box-shadow]",
     "outline-none focus-visible:border-primary focus-visible:ring-[3px] focus-visible:ring-ring/32",
-    "aria-invalid:border-destructive aria-invalid:text-destructive aria-invalid:ring-[3px] aria-invalid:ring-destructive/24",
-    "data-invalid:border-destructive data-invalid:text-destructive data-invalid:ring-[3px] data-invalid:ring-destructive/24",
-    "dark:aria-invalid:border-destructive-foreground dark:aria-invalid:text-destructive-foreground dark:aria-invalid:ring-destructive-foreground/40",
-    "dark:data-invalid:border-destructive-foreground dark:data-invalid:text-destructive-foreground dark:data-invalid:ring-destructive-foreground/40",
+    // Invalid text takes the 700/300 partner in both themes; red-400 as text
+    // is 2.89:1 on white. The 400 accent stays on the border and the ring.
+    "aria-invalid:border-destructive aria-invalid:text-destructive-foreground aria-invalid:ring-[3px] aria-invalid:ring-destructive/24",
+    "data-invalid:border-destructive data-invalid:text-destructive-foreground data-invalid:ring-[3px] data-invalid:ring-destructive/24",
+    "dark:aria-invalid:border-destructive-foreground dark:aria-invalid:ring-destructive-foreground/40",
+    "dark:data-invalid:border-destructive-foreground dark:data-invalid:ring-destructive-foreground/40",
     "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-64",
     "motion-reduce:transition-none!",
   ],

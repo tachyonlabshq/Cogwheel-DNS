@@ -233,11 +233,42 @@ function InspectionReport({ result }: { result: Inspection }) {
             magnitude={magnitude}
             title="Pushes away from “ad domain”"
           />
+
+          <dl className="space-y-1 rounded-xl border border-border p-3 text-xs">
+            <div className="flex gap-2">
+              <dt className="w-28 shrink-0 font-medium text-foreground">
+                {KIND_COPY.dense.label}
+              </dt>
+              <dd className="min-w-0 text-muted-foreground">{KIND_COPY.dense.hint}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-28 shrink-0 font-medium text-foreground">
+                {KIND_COPY.ngram.label}
+              </dt>
+              <dd className="min-w-0 text-muted-foreground">{KIND_COPY.ngram.hint}</dd>
+            </div>
+          </dl>
         </div>
       )}
     </div>
   );
 }
+
+/**
+ * `kind` arrives from the API as the model's own vocabulary. Neither word means
+ * anything to the person asking why their printer stopped resolving, so the
+ * chip carries the plain-language name and the report carries a legend.
+ */
+const KIND_COPY: Record<Inspection["contributions"][number]["kind"], { label: string; hint: string }> = {
+  dense: {
+    label: "Measured trait",
+    hint: "A measured property of the hostname itself, such as how long it is, how many digits or hyphens it has, or how random the letters look.",
+  },
+  ngram: {
+    label: "Character run",
+    hint: "A specific short sequence of characters the model learned to associate with ad and tracking hostnames.",
+  },
+};
 
 function ContributionGroup({
   title,
@@ -270,7 +301,12 @@ function ContributionGroup({
             <span className="w-40 shrink-0 truncate font-mono text-foreground text-xs" title={item.label}>
               {item.label}
             </span>
-            <span className="text-muted-foreground text-[11px] uppercase">{item.kind}</span>
+            <span
+              className="w-28 shrink-0 text-muted-foreground text-[11px]"
+              title={KIND_COPY[item.kind].hint}
+            >
+              {KIND_COPY[item.kind].label}
+            </span>
             <span className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
               <span
                 className={cn("block h-full rounded-full", direction === "up" ? "bg-destructive" : "bg-success")}

@@ -146,9 +146,10 @@ const menuItemVariants = tv({
         "data-highlighted:bg-accent data-highlighted:text-accent-foreground",
       ],
       destructive: [
-        "text-destructive dark:text-destructive-foreground",
+        // Tint + 700/300 text, matching the destructive button.
+        "text-destructive-foreground",
         "data-highlighted:bg-destructive/10 dark:data-highlighted:bg-destructive-foreground/10",
-        "**:[svg]:text-destructive! dark:**:[svg]:text-destructive-foreground!",
+        "**:[svg]:text-destructive-foreground!",
       ],
     },
   },
@@ -334,7 +335,7 @@ export const MenuShortcut = (props: React.ComponentProps<typeof ark.span>) => {
       className={cn(
         "ms-auto rtl:me-auto",
         "text-muted-foreground text-xs tracking-widest",
-        "group-data-highlighted/menu-item:group-data-[variant=destructive]/menu-item:text-destructive dark:group-data-highlighted/menu-item:group-data-[variant=destructive]/menu-item:text-destructive-foreground",
+        "group-data-highlighted/menu-item:group-data-[variant=destructive]/menu-item:text-destructive-foreground",
         className
       )}
       data-slot="menu-shortcut"

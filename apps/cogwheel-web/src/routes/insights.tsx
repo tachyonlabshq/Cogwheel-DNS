@@ -19,13 +19,15 @@ import { DataTable, type Column } from "@/components/app/data-table";
 import { RankBars } from "@/components/app/metric-sparkline";
 import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
-import { EmptyState, NoticeBanner } from "@/components/app/states";
+import { AsyncRegion, EmptyState, LoadingSkeleton, NoticeBanner } from "@/components/app/states";
 import { useDomainInspector } from "@/components/app/inspector-context";
 
 export function InsightsScreen() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const { inspect } = useDomainInspector();
   const [confirmRollback, setConfirmRollback] = React.useState(false);
+
+  const loading = phase === "loading";
 
   const rulesets = useAsync<RulesetSummary[]>("rulesets", (signal) => api.rulesets({ signal }));
   const budget = useAsync<FalsePositiveBudgetStatus>("false-positive-budget", (signal) =>
@@ -119,42 +121,56 @@ export function InsightsScreen() {
       />
 
       <PageSections>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatTile
-            hint="Rolling window held in memory; lost on restart"
-            label="Observed queries"
-            value={formatCompact(insights.observed_queries)}
-          />
-          <StatTile
-            delta={`${formatPercent(blockedRatio(dashboard), 2)} of all traffic`}
-            label="Blocked"
-            value={formatCompact(dashboard.runtime_health.snapshot.blocked_total)}
-          />
-          <StatTile
-            delta={`${formatCount(summary.medium_count)} medium · ${formatCount(summary.high_count)} high`}
-            label="Critical events"
-            tone={summary.critical_count > 0 ? "bad" : "neutral"}
-            toneLabel={summary.critical_count > 0 ? "Attention" : undefined}
-            value={formatCount(summary.critical_count)}
-          />
-          <StatTile
-            hint="Webhook deliveries that succeeded"
-            label="Alert success rate"
-            tone={analytics.success_rate_percent < 100 ? "warn" : "good"}
-            toneLabel={analytics.success_rate_percent < 100 ? "Degraded" : "Healthy"}
-            value={`${analytics.success_rate_percent.toFixed(1)}%`}
-          />
-        </div>
+        {/* A zeroed tile during the first poll reads as "nothing has happened",
+            which is a different claim from "we have not been told yet". */}
+        {loading ? (
+          <LoadingSkeleton rows={4} variant="cards" />
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatTile
+              hint="Rolling window held in memory; lost on restart"
+              label="Observed queries"
+              value={formatCompact(insights.observed_queries)}
+            />
+            <StatTile
+              delta={`${formatPercent(blockedRatio(dashboard), 2)} of all traffic`}
+              label="Blocked"
+              value={formatCompact(dashboard.runtime_health.snapshot.blocked_total)}
+            />
+            <StatTile
+              delta={`${formatCount(summary.medium_count)} medium · ${formatCount(summary.high_count)} high`}
+              label="Critical events"
+              tone={summary.critical_count > 0 ? "bad" : "neutral"}
+              toneLabel={summary.critical_count > 0 ? "Attention" : undefined}
+              value={formatCount(summary.critical_count)}
+            />
+            <StatTile
+              hint="Webhook deliveries that succeeded"
+              label="Alert success rate"
+              tone={analytics.success_rate_percent < 100 ? "warn" : "good"}
+              toneLabel={analytics.success_rate_percent < 100 ? "Degraded" : "Healthy"}
+              value={`${analytics.success_rate_percent.toFixed(1)}%`}
+            />
+          </div>
+        )}
 
         <div className="grid gap-4 xl:grid-cols-2">
           <SectionCard description="Busiest destinations in the rolling window." title="Top queried domains">
-            {insights.top_queried_domains.length === 0 ? (
-              <EmptyState
-                description="Nothing has been resolved through Cogwheel yet in the current window."
-                icon={ChartNoAxesColumnIcon}
-                title="No traffic recorded"
-              />
-            ) : (
+            <AsyncRegion
+              empty={
+                <EmptyState
+                  description="Nothing has been resolved through Cogwheel yet in the current window."
+                  icon={ChartNoAxesColumnIcon}
+                  title="No traffic recorded"
+                />
+              }
+              error={error}
+              errorTitle="Could not load queried domains"
+              isEmpty={insights.top_queried_domains.length === 0}
+              loading={loading}
+              onRetry={() => void reload()}
+              skeletonRows={5}
+            >
               <>
                 <RankBars
                   ariaLabel="Top queried domains by query count"
@@ -180,17 +196,25 @@ export function InsightsScreen() {
                   ))}
                 </ul>
               </>
-            )}
+            </AsyncRegion>
           </SectionCard>
 
           <SectionCard description="Where filtering engages most." title="Top blocked domains">
-            {insights.top_blocked_domains.length === 0 ? (
-              <EmptyState
-                description="No domain has been blocked in the current window."
-                icon={ShieldAlertIcon}
-                title="Nothing blocked yet"
-              />
-            ) : (
+            <AsyncRegion
+              empty={
+                <EmptyState
+                  description="No domain has been blocked in the current window."
+                  icon={ShieldAlertIcon}
+                  title="Nothing blocked yet"
+                />
+              }
+              error={error}
+              errorTitle="Could not load blocked domains"
+              isEmpty={insights.top_blocked_domains.length === 0}
+              loading={loading}
+              onRetry={() => void reload()}
+              skeletonRows={5}
+            >
               <>
                 <RankBars
                   ariaLabel="Top blocked domains by block count"
@@ -217,7 +241,7 @@ export function InsightsScreen() {
                   ))}
                 </ul>
               </>
-            )}
+            </AsyncRegion>
           </SectionCard>
         </div>
 
@@ -225,13 +249,21 @@ export function InsightsScreen() {
           description="Devices generating the most classifier-flagged events."
           title="Noisiest devices"
         >
-          {summary.top_devices.length === 0 ? (
-            <EmptyState
-              description="No device has triggered a risky-domain event yet."
-              icon={ShieldAlertIcon}
-              title="No flagged devices"
-            />
-          ) : (
+          <AsyncRegion
+            empty={
+              <EmptyState
+                description="No device has triggered a risky-domain event yet."
+                icon={ShieldAlertIcon}
+                title="No flagged devices"
+              />
+            }
+            error={error}
+            errorTitle="Could not load flagged devices"
+            isEmpty={summary.top_devices.length === 0}
+            loading={loading}
+            onRetry={() => void reload()}
+            skeletonRows={3}
+          >
             <ul className="space-y-2">
               {summary.top_devices.map((device) => (
                 <li
@@ -251,7 +283,7 @@ export function InsightsScreen() {
                 </li>
               ))}
             </ul>
-          )}
+          </AsyncRegion>
         </SectionCard>
 
         <SectionCard
@@ -364,7 +396,7 @@ export function InsightsScreen() {
                 "Alert deliveries appear here once outbound notifications are enabled and an event fires.",
             }}
             error={error}
-            loading={phase === "loading"}
+            loading={loading}
             onRetry={() => void reload()}
             rowKey={(row) => `${row.created_at}-${row.domain}-${row.status}`}
             rows={dashboard.recent_notification_deliveries}
