@@ -552,8 +552,30 @@ jobs:
           for upgrades, backup/restore and troubleshooting.
           NOTES
 
-          gh release create "${TAG}" \
-            --title "Cogwheel ${TAG}" \
-            --notes-file notes.md \
-            --generate-notes \
-            artifacts/*
+          # Create-or-update rather than create.
+          #
+          # Two ordinary situations reach this step with the release already
+          # present, and `gh release create` fails outright on both:
+          #
+          #   - The tag was made through the GitHub UI ("Draft a new release"),
+          #     which is the easiest way to start a release and creates the
+          #     release object before this workflow ever runs.
+          #   - This job is re-run. That is expected at least once: the manifest
+          #     job blocks the first release until the GHCR package is made
+          #     public, and re-running is the documented fix.
+          #
+          # Failing there would mean a tag with images published and no release
+          # notes or artifacts attached to it.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists -- attaching artifacts and refreshing notes"
+            gh release upload "${TAG}" artifacts/* --clobber
+            gh release edit "${TAG}" \
+              --title "Cogwheel ${TAG}" \
+              --notes-file notes.md
+          else
+            gh release create "${TAG}" \
+              --title "Cogwheel ${TAG}" \
+              --notes-file notes.md \
+              --generate-notes \
+              artifacts/*
+          fi
