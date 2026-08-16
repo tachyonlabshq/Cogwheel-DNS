@@ -1,88 +1,54 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+#
+# DEPRECATED — kept only so existing links and runbooks keep working.
+#
+# This script used to carry its own copy of the port-53 conflict handling, the
+# container run flags and the advertised-target detection. All of that now
+# lives in scripts/install.sh, which additionally waits for the container to
+# become healthy, proves the resolver answers a real query, rolls back on
+# failure, and supports --uninstall.
+#
+# Use scripts/install.sh directly:
+#
+#   sudo ./scripts/install.sh
+#   sudo ./scripts/install.sh --help
+#
+# This shim forwards whatever you pass it and will be removed in a future
+# release.
 
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "Run this installer as root so it can publish port 53 and adjust local resolver settings." >&2
-  exit 1
+set -eu
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+printf 'scripts/install-home-docker.sh is deprecated; forwarding to scripts/install.sh\n' >&2
+
+# Map the environment variables the old script honoured onto the new flags.
+#
+# Order matters: the mapped flags are appended first, then the caller's own
+# arguments are rotated to the end so an explicit flag always beats a legacy
+# environment variable. (`set --` on its own would discard "$@" entirely,
+# which would silently turn `install-home-docker.sh --help` into a real
+# install.)
+argc=$#
+
+if [ -n "${IMAGE_TAG:-}" ]; then      set -- "$@" --image "$IMAGE_TAG"; fi
+if [ -n "${CONTAINER_NAME:-}" ]; then set -- "$@" --container "$CONTAINER_NAME"; fi
+if [ -n "${DNS_HOST_PORT:-}" ]; then  set -- "$@" --dns-port "$DNS_HOST_PORT"; fi
+if [ -n "${WEB_HOST_PORT:-}" ]; then  set -- "$@" --http-port "$WEB_HOST_PORT"; fi
+
+# Rotate the original arguments from the front to the back.
+i=0
+while [ "$i" -lt "$argc" ]; do
+    set -- "$@" "$1"
+    shift
+    i=$((i + 1))
+done
+
+if [ -n "${INSTALL_TAILSCALE:-}" ] && [ "${INSTALL_TAILSCALE}" = "1" ]; then
+    printf 'note: Tailscale bootstrap is no longer part of the installer.\n' >&2
+    printf '      Install Tailscale yourself, then run:\n' >&2
+    printf '        sudo DNS_HOST_PORT=%s %s/apply-tailscale-dns-intercept.sh\n' \
+           "${DNS_HOST_PORT:-53}" "$SCRIPT_DIR" >&2
 fi
 
-IMAGE_TAG="${IMAGE_TAG:-cogwheel-server:latest}"
-CONTAINER_NAME="${CONTAINER_NAME:-cogwheel}"
-DATA_DIR="${DATA_DIR:-/var/lib/cogwheel}"
-DNS_HOST_PORT="${DNS_HOST_PORT:-53}"
-WEB_HOST_PORT="${WEB_HOST_PORT:-30080}"
-INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-0}"
-TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
-ADVERTISED_DNS_TARGETS="${COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS:-}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if [[ -z "$ADVERTISED_DNS_TARGETS" ]]; then
-  HOST_SHORTNAME="$(hostname)"
-  IPV4_TARGETS="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' || true)"
-  IPV6_TARGETS="$(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)"
-  ADVERTISED_DNS_TARGETS="$HOST_SHORTNAME"
-  if [[ -n "$IPV4_TARGETS" ]]; then
-    while IFS= read -r ip; do
-      [[ -n "$ip" ]] && ADVERTISED_DNS_TARGETS+=",$ip"
-    done <<< "$IPV4_TARGETS"
-  fi
-  if [[ -n "$IPV6_TARGETS" ]]; then
-    while IFS= read -r ip; do
-      [[ -n "$ip" ]] && ADVERTISED_DNS_TARGETS+=",$ip"
-    done <<< "$IPV6_TARGETS"
-  fi
-fi
-
-if [[ "$DNS_HOST_PORT" == "53" ]] && command -v systemctl >/dev/null 2>&1; then
-  mkdir -p /etc/systemd/resolved.conf.d
-  cat >/etc/systemd/resolved.conf.d/cogwheel.conf <<'EOF'
-[Resolve]
-DNSStubListener=no
-EOF
-  systemctl restart systemd-resolved >/dev/null 2>&1 || true
-fi
-
-if ss -lntup "( sport = :${DNS_HOST_PORT} )" | grep -q LISTEN; then
-  echo "Port ${DNS_HOST_PORT} is still busy. Stop the conflicting DNS service, then rerun this installer." >&2
-  exit 1
-fi
-
-if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
-  curl -fsSL https://tailscale.com/install.sh | sh
-  if [[ -n "$TAILSCALE_AUTH_KEY" ]]; then
-    tailscale up --auth-key "$TAILSCALE_AUTH_KEY" --advertise-exit-node --accept-dns=false
-  else
-    echo "Tailscale installed. Complete 'tailscale up --advertise-exit-node --accept-dns=false' after authenticating the node." >&2
-  fi
-
-  DNS_HOST_PORT="$DNS_HOST_PORT" "$SCRIPT_DIR/apply-tailscale-dns-intercept.sh"
-fi
-
-mkdir -p "$DATA_DIR"
-chown -R 10001:10001 "$DATA_DIR"
-
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-
-docker run -d \
-  --name "$CONTAINER_NAME" \
-  --restart unless-stopped \
-  -p "${DNS_HOST_PORT}:30053/udp" \
-  -p "${DNS_HOST_PORT}:30053/tcp" \
-  -p "${WEB_HOST_PORT}:30080" \
-  -e COGWHEEL_PROFILE=dev \
-  -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
-  -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT="${DNS_HOST_PORT}" \
-  -e COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS="${ADVERTISED_DNS_TARGETS}" \
-  -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
-  -v "$DATA_DIR:/app/data" \
-  "$IMAGE_TAG"
-
-echo "Cogwheel is running."
-echo "- DNS targets: ${ADVERTISED_DNS_TARGETS}"
-echo "- Web UI: http://$(hostname):${WEB_HOST_PORT}"
-if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
-  echo "- Tailscale exit-node advertising prepared. Toggle it in Settings once the node is authenticated."
-  echo "- Tailscale DNS interception is pinned to tailscale0 so exit-node DNS traffic reaches Cogwheel."
-fi
+exec sh "$SCRIPT_DIR/install.sh" "$@"

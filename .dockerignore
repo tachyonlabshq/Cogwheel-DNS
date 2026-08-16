@@ -1,0 +1,54 @@
+# Build context exclusions.
+#
+# Two goals:
+#   1. Keep the context small (a `target/` directory is easily several GB).
+#   2. Keep the context STABLE. Every byte sent to the daemon participates in
+#      BuildKit's cache keys, so excluding files the build never reads means
+#      editing a doc or a script does not invalidate a single build layer.
+#
+# Anything the build genuinely needs must NOT appear here. In particular:
+#   - Cargo.toml / Cargo.lock / crates/ / apps/  (Rust build + cargo-chef recipe)
+#   - crates/cogwheel-classifier/model/*.cwm     (include_bytes! into the binary)
+#   - apps/cogwheel-web/package*.json + src/     (web bundle)
+
+# --- VCS and CI -------------------------------------------------------------
+.git
+.gitignore
+.github
+.claude
+
+# --- Build output -----------------------------------------------------------
+target
+**/target
+**/node_modules
+apps/cogwheel-web/dist
+**/*.tsbuildinfo
+coverage
+
+# --- Runtime state and secrets ----------------------------------------------
+# `.env` is how compose passes real config; it must never be baked into a layer.
+data
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+
+# --- Documentation, deployment assets, research -----------------------------
+# None of this is read by the build; excluding it keeps doc edits from
+# busting the Rust and web layers.
+*.md
+docs
+Research
+deploy
+scripts
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# --- Editor / OS noise ------------------------------------------------------
+.idea
+.vscode
+.DS_Store
+*.swp

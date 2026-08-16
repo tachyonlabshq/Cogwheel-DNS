@@ -1,122 +1,131 @@
 # Operator Quick Start
 
-This guide is for people deploying and maintaining a Cogwheel node.
+A one-page reference for people who run a Cogwheel node.
 
-## What You Need
+**[DEPLOYMENT.md](../DEPLOYMENT.md) is the full guide** — installation, the
+port-53 conflict, networking modes, upgrades, backup/restore, troubleshooting
+and uninstall all live there. This page is the short version.
 
-- Docker 24+ or a local Rust toolchain
-- One machine that can bind DNS and HTTP ports
-- Access to upstream DNS resolvers
+## Install
 
-## Fastest Local Run
-
-Run Cogwheel directly for a local test session:
-
-```bash
-COGWHEEL_PROFILE=dev \
-COGWHEEL_SERVER__HTTP_BIND_ADDR=127.0.0.1:30080 \
-COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=127.0.0.1:30053 \
-COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=127.0.0.1:30053 \
-cargo run -p cogwheel-server
+```sh
+curl -fsSL https://raw.githubusercontent.com/tachyonlabshq/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 ```
 
-Then open `http://localhost:30080`.
+Then point your router's DNS at the address the installer prints.
 
-Built-in deployment profiles:
+Other paths: Docker Compose (`cp .env.example .env && docker compose up -d`)
+and native systemd (`sudo ./scripts/install-native.sh`). See
+[DEPLOYMENT.md §1](../DEPLOYMENT.md#1-choosing-an-install-method).
 
-- `dev` - loopback-only, non-privileged local ports
-- `home` - default home-lab profile; pair it with host port `53` publishing for client devices
-- `smb` - small-business profile with DNS on port `53` and stricter guard thresholds
+## Verify
 
-## Docker Run
-
-Build and run the server container:
-
-```bash
-docker build -t cogwheel:latest .
-
-docker run -d \
-  --name cogwheel \
-  --restart unless-stopped \
-  -p 53:30053/udp \
-  -p 53:30053/tcp \
-  -p 30080:30080 \
-  -e COGWHEEL_PROFILE=dev \
-  -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
-  -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
-  -e COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS="fractal.local,192.168.86.249,2601:189:8480:2101:2ecf:67ff:fe12:c24a" \
-  -v cogwheel_data:/app/data \
-  cogwheel:latest
+```sh
+sh scripts/verify-install.sh
 ```
 
-This mirrors the way Pi-hole and AdGuard Home expose standard DNS on the host while letting the app keep a safe internal bind port.
+Checks liveness, readiness, metrics, the web UI, an allowed lookup, a blocked
+lookup, DNS over TCP, and that state survives a restart. Exits non-zero on
+failure, so it is safe to run from cron.
 
-For a reusable installer-style command, use `scripts/install-home-docker.sh`.
+## The one thing that goes wrong
 
-If you want Tailscale exit-node traffic to be filtered too, install the host redirect rule so `tailscale0` DNS requests are forced into Cogwheel:
+Port 53. On most Linux hosts `systemd-resolved` holds `127.0.0.53:53`.
 
-```bash
+```sh
+sudo ss -lnptu '( sport = :53 )'     # who has it
+sudo ./scripts/install.sh --fix-port-53
+```
+
+That disables the stub listener *and* repairs `/etc/resolv.conf`, which would
+otherwise leave the host with no working resolver. Full detail and the manual
+equivalent: [DEPLOYMENT.md §8.1](../DEPLOYMENT.md#81-port-53-is-already-in-use).
+
+## Networking decides a feature
+
+Per-device block profiles key on the DNS client's source IP. Host networking
+preserves it; Docker bridge networking often rewrites it to the bridge gateway,
+which silently collapses every device into one. Default to host networking and
+verify with a query from a second machine —
+[DEPLOYMENT.md §5](../DEPLOYMENT.md#5-networking-host-vs-bridge-and-why-it-decides-a-feature).
+
+## Deployment profiles
+
+| Profile | HTTP bind | DNS bind | Use for |
+|---|---|---|---|
+| `dev` | `127.0.0.1:30080` | `127.0.0.1:30053` | local development |
+| `home` | `0.0.0.0:8080` | `0.0.0.0:5353` | household node (the image overrides DNS to `:53`) |
+| `smb` | `0.0.0.0:8080` | `0.0.0.0:53` | small business, stricter guard thresholds |
+
+A profile only sets defaults; any explicit `COGWHEEL_*` variable wins over it.
+Full variable table: [DEPLOYMENT.md §9](../DEPLOYMENT.md#9-configuration-reference).
+
+## Local run without Docker
+
+```sh
+COGWHEEL_PROFILE=dev cargo run -p cogwheel-server
+curl -s http://127.0.0.1:30080/health/live
+dig @127.0.0.1 -p 30053 example.com +short
+```
+
+## Health and metrics endpoints
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /health/live` | liveness. What the container `HEALTHCHECK` probes. |
+| `GET /health/ready` | readiness. **Currently an unconditional stub** — it does not probe the database or the resolver. |
+| `GET /metrics` | Prometheus text. Today this is only `cogwheel_startups_total`. |
+| `GET /api/v1/runtime` | the numbers that actually matter: cache hits, upstream failures, fallbacks, mean latencies. |
+
+## Day-2 operations
+
+```sh
+# Where should clients point?
+curl -s http://127.0.0.1:8080/api/v1/resolver-access
+
+# Runtime health and false-positive budget before a change.
+curl -s http://127.0.0.1:8080/api/v1/runtime/health
+curl -s http://127.0.0.1:8080/api/v1/false-positive-budget
+
+# Logs
+docker logs -f cogwheel          # container install
+journalctl -u cogwheel -f        # native install
+```
+
+- Back up the data directory before any upgrade —
+  [DEPLOYMENT.md §11](../DEPLOYMENT.md#11-backup-and-restore). The
+  `/api/v1/backup` endpoint is a partial config export, not a full backup.
+- Use the load-test and resilience-drill endpoints for soak and failure
+  validation.
+- Roll back a bad ruleset with `POST /api/v1/rulesets/rollback`.
+
+## Optional: filter Tailscale exit-node DNS
+
+If the node advertises itself as a Tailscale exit node and you want tailnet
+traffic filtered too, install the host redirect rule:
+
+```sh
 sudo DNS_HOST_PORT=53 scripts/apply-tailscale-dns-intercept.sh
 ```
 
-Optional Tailscale bootstrap:
+Authenticate the node with `tailscale up --advertise-exit-node --accept-dns=false`
+so exit-node traffic keeps flowing through Cogwheel.
 
-```bash
-sudo INSTALL_TAILSCALE=1 TAILSCALE_AUTH_KEY=tskey-example scripts/install-home-docker.sh
-```
+## Before shipping a change
 
-This installs Tailscale, authenticates when a key is supplied, and advertises the node as an exit node while keeping `--accept-dns=false` so exit-node traffic continues to flow through Cogwheel's DNS path.
-
-For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
-
-## Required Environment Variables
-
-- `COGWHEEL_SERVER__HTTP_BIND_ADDR`
-- `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
-- `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`
-- `COGWHEEL_SERVER__ADVERTISED_DNS_PORT`
-- `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS`
-- `COGWHEEL_PROFILE`
-- `COGWHEEL_STORAGE__DATABASE_URL`
-- `COGWHEEL_UPSTREAM__SERVERS`
-
-On dual-stack networks, advertise Cogwheel's IPv6 address too; otherwise clients can keep using IPv6 DNS paths that bypass an IPv4-only DNS setting.
-
-## Smoke Test Checklist
-
-After startup, verify:
-
-```bash
-curl http://127.0.0.1:30080/api/v1/dashboard
-curl http://127.0.0.1:30080/api/v1/config/version
-curl http://127.0.0.1:30080/api/v1/false-positive-budget
-```
-
-If Tailscale integration is enabled, also check:
-
-```bash
-curl http://127.0.0.1:30080/api/v1/tailscale/status
-```
-
-## Day-2 Operations
-
-- Use backup and restore APIs before major changes.
-- Review resilience drill endpoints after upgrades.
-- Check false-positive budget before release candidates.
-- Use the load-test endpoint for soak and throughput verification.
-
-## Regression Checks
-
-Before shipping changes, run:
-
-```bash
-cargo fmt --all
-cargo test --workspace
+```sh
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
 cargo audit
 cargo deny check
-npm run lint --prefix apps/cogwheel-web
-npm run build --prefix apps/cogwheel-web
+
+npm --prefix apps/cogwheel-web ci
+npm --prefix apps/cogwheel-web run lint
+npm --prefix apps/cogwheel-web run build
+
+shellcheck scripts/*.sh
+docker buildx build --check .
 ```
+
+CI runs all of these on every push.

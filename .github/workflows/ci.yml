@@ -5,24 +5,201 @@ on:
     branches: ["**"]
   pull_request:
 
+# A new push to the same branch makes the previous run irrelevant. Cancelling
+# it keeps arm64 runner minutes from piling up behind superseded commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   rust:
+    name: rust
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
+
       - name: Format
         run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: Test
         run: cargo test --workspace
+
+      # --locked fails if Cargo.lock does not satisfy the manifests. Without it
+      # a dependency bump can land in CI green and then resolve differently in
+      # the release build, which is exactly the class of bug that only shows up
+      # on the appliance.
+      - name: Build (locked)
+        run: cargo build --release --locked -p cogwheel-server
+
       - name: Audit
         run: cargo audit
+
       - name: Deny
         run: cargo deny check
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/cogwheel-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/cogwheel-web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # `npm run build` is `tsc --noEmit -p tsconfig.app.json && vite build`,
+      # so this one step covers both typecheck and bundle.
+      - name: Typecheck and build
+        run: npm run build
+
+      # The appliance is a Raspberry Pi serving this bundle to phones on a
+      # home network. Printing the size every run makes a regression visible
+      # in the log instead of six months later.
+      - name: Report bundle size
+        run: |
+          {
+            echo "### Web bundle"
+            echo '```'
+            du -sh dist
+            find dist/assets -type f \( -name '*.js' -o -name '*.css' \) \
+              -exec du -h {} + | sort -h
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/cogwheel-web/dist
+          retention-days: 7
+
+  image:
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          # GitHub-hosted arm64 runners. Building arm64 natively rather than
+          # under QEMU is the difference between minutes and hours for a Rust
+          # workspace. If this label is not available to the repository,
+          # replace it with ubuntu-latest plus docker/setup-qemu-action and
+          # expect a much longer job.
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Lint the Dockerfile
+        run: docker buildx build --check .
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
+
+  deploy-assets:
+    name: shell + yaml + systemd
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          python3 -m pip install --quiet yamllint
+
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh; do
+            echo "sh -n $f"
+            sh -n "$f"
+          done
+
+      # No -s override: shellcheck picks the dialect from each shebang, so the
+      # POSIX installers are checked as sh and legacy helpers as bash.
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: YAML parses
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          files = sorted(glob.glob('.github/workflows/*.yml')) + ['docker-compose.yml']
+          bad = False
+          for f in files:
+              try:
+                  yaml.safe_load(open(f))
+                  print(f'ok   {f}')
+              except Exception as e:
+                  print(f'FAIL {f}: {e}')
+                  bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Systemd unit
+        run: |
+          # systemd-analyze checks ExecStart is executable, so give it a stub.
+          sudo install -Dm0755 /dev/null /usr/local/bin/cogwheel-server
+          systemd-analyze verify deploy/cogwheel.service
+          sudo rm -f /usr/local/bin/cogwheel-server
+
+      # This is a product, not one person's box. `git grep` is used rather than
+      # plain grep so only tracked files are searched -- build output under
+      # dist/ and target/ is irrelevant and would produce false positives.
+      #
+      # Excluded paths:
+      #   docs/architecture/  point-in-time survey documents that legitimately
+      #                       quote the defective values they are reporting on
+      #   this file           it necessarily contains the patterns themselves
+      - name: No personal hostnames, users or LAN addresses
+        run: |
+          if git grep -nE '(michaelwong|fractal\.local|192\.168\.86\.[0-9]+)' -- \
+               ':!docs/architecture' ':!.github/workflows/ci.yml'; then
+            echo "::error::personal hostname, username or LAN address found above"
+            exit 1
+          fi
+          echo "clean"

@@ -1,0 +1,130 @@
+# Cogwheel DNS — hardened systemd unit for a native (non-Docker) install.
+#
+# Install with scripts/install-native.sh, or by hand:
+#   install -Dm0644 deploy/cogwheel.service /etc/systemd/system/cogwheel.service
+#   systemctl daemon-reload
+#   systemctl enable --now cogwheel
+#
+# Expected layout (all created by scripts/install-native.sh):
+#   /usr/local/bin/cogwheel-server        the binary
+#   /usr/local/share/cogwheel/web         built web assets (COGWHEEL_WEB_DIST_DIR)
+#   /etc/cogwheel/cogwheel.env            configuration
+#   /var/lib/cogwheel                     SQLite database (StateDirectory)
+#
+# Check the hardening score after any edit:  systemd-analyze security cogwheel
+
+[Unit]
+Description=Cogwheel DNS filtering appliance
+Documentation=https://github.com/tachyonlabshq/Cogwheel-DNS/blob/main/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+# Cogwheel binds :53. If systemd-resolved's stub listener is still running it
+# owns 127.0.0.53:53 and this unit will fail to start. install-native.sh
+# disables the stub; ordering after it means a reboot brings things up in a
+# deterministic order rather than racing for the socket.
+After=systemd-resolved.service
+
+[Service]
+Type=exec
+User=cogwheel
+Group=cogwheel
+
+EnvironmentFile=/etc/cogwheel/cogwheel.env
+ExecStart=/usr/local/bin/cogwheel-server
+
+Restart=on-failure
+RestartSec=5s
+# Enough time for in-flight upstream queries to finish before SIGKILL.
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+KillMode=mixed
+
+# ---------------------------------------------------------------------------
+# Capabilities
+#
+# Binding a port below 1024 needs CAP_NET_BIND_SERVICE. Ambient (not just
+# bounding) is what an unprivileged process actually receives: the bounding set
+# alone grants nothing. Bounding is narrowed to the same single capability so
+# the process cannot acquire anything else even via a setuid binary.
+# ---------------------------------------------------------------------------
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# ---------------------------------------------------------------------------
+# Filesystem
+#
+# ProtectSystem=strict makes the entire filesystem hierarchy read-only.
+# StateDirectory= punches the single required hole: it creates
+# /var/lib/cogwheel owned by User=/Group= and makes it writable, so no explicit
+# ReadWritePaths= is needed and there is exactly one writable path in the unit.
+# ---------------------------------------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+StateDirectory=cogwheel
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/cogwheel
+UMask=0077
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+PrivateMounts=yes
+
+# ---------------------------------------------------------------------------
+# Network
+#
+# AF_INET/AF_INET6 are the DNS and HTTP sockets. AF_UNIX is needed for
+# journald logging.
+#
+# AF_NETLINK is NOT optional despite looking like it: glibc's getaddrinfo()
+# opens an AF_NETLINK/NETLINK_ROUTE socket (__check_pf) to discover which
+# address families this host actually has. Cogwheel's HTTPS blocklist fetches
+# go through reqwest, whose default resolver is getaddrinfo. Drop AF_NETLINK
+# and blocklist updates start failing to resolve their source hosts.
+# ---------------------------------------------------------------------------
+#
+# No IPAddressDeny/IPAddressAllow pair is set: a recursive resolver must be
+# able to reach arbitrary upstream addresses, so an allow-list here would be
+# either wrong or a no-op.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @debug
+
+# ---------------------------------------------------------------------------
+# Resources — sized for a Raspberry Pi 5 (4 cores, 4-16 GB).
+# MemoryHigh throttles and reclaims before MemoryMax kills, so a memory spike
+# degrades DNS latency instead of taking the resolver down for the whole house.
+# CPUQuota=200% is two of the Pi's four cores.
+# ---------------------------------------------------------------------------
+MemoryHigh=768M
+MemoryMax=1G
+CPUQuota=200%
+TasksMax=512
+LimitNOFILE=65535
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cogwheel
+
+[Install]
+WantedBy=multi-user.target

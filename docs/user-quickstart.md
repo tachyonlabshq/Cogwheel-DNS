@@ -6,8 +6,22 @@ This guide is for someone using Cogwheel as a DNS filtering appliance.
 
 Visit the Cogwheel web UI in your browser:
 
+- Standard deployment: `http://<your-cogwheel-host>:8080`
 - Local development: `http://localhost:30080`
-- Standard deployment: `http://<your-node>:8080`
+
+Whoever installed Cogwheel will have the address; the installer prints it at
+the end, and it is the same address your router's DNS setting points at.
+
+## Make Sure Your Devices Are Actually Using It
+
+Filtering only applies to devices whose DNS goes through Cogwheel. The reliable
+way is to set it once on your router, in the DHCP settings, so every device is
+covered — including the ones you cannot configure.
+
+If some sites are filtered and others are not, the most common cause is IPv6:
+a device with an IPv6 DNS server configured will ignore an IPv4-only setting.
+Ask your operator to set both addresses. See
+[DEPLOYMENT.md](../DEPLOYMENT.md#6-pointing-your-router-at-cogwheel).
 
 ## First Things to Configure
 

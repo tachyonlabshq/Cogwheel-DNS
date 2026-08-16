@@ -1,109 +1,695 @@
 # Cogwheel Deployment Guide
 
-## Raspberry Pi Deployment (fractal.local)
+The single source of truth for installing, operating, upgrading and removing
+Cogwheel. If a command here does not work, that is a bug — please report it.
 
-### Prerequisites
-- Raspberry Pi 5 with 16GB Optane storage
-- Docker installed on Pi
-- Network access to Pi (fractal.local or 192.168.86.249)
+Cogwheel is a DNS filtering appliance. It binds port 53, answers queries for
+every device on your network, and serves a web control plane on port 8080. The
+reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
+64-bit Linux host (`x86_64` or `aarch64`) works.
 
-### Automated Deployment
+---
 
-Run from development machine:
-```bash
-./deploy-to-fractal.sh
+## Contents
+
+1. [Choosing an install method](#1-choosing-an-install-method)
+2. [Quick start — the one-line installer](#2-quick-start--the-one-line-installer)
+3. [Docker Compose](#3-docker-compose)
+4. [Native install with systemd](#4-native-install-with-systemd)
+5. [Networking: host vs bridge, and why it decides a feature](#5-networking-host-vs-bridge-and-why-it-decides-a-feature)
+6. [Pointing your router at Cogwheel](#6-pointing-your-router-at-cogwheel)
+7. [Post-install verification checklist](#7-post-install-verification-checklist)
+8. [Troubleshooting](#8-troubleshooting)
+9. [Configuration reference](#9-configuration-reference)
+10. [Upgrades](#10-upgrades)
+11. [Backup and restore](#11-backup-and-restore)
+12. [Uninstall](#12-uninstall)
+13. [Local development](#13-local-development)
+
+---
+
+## 1. Choosing an install method
+
+| | One-line installer | Docker Compose | Native systemd |
+|---|---|---|---|
+| Best for | Most people | You already run a Compose stack | You do not want Docker |
+| Needs Docker | yes | yes | no |
+| Config lives in | `/etc/cogwheel/cogwheel.env` (generated) | `.env` (yours to edit) | `/etc/cogwheel/cogwheel.env` (yours to edit) |
+| Handles the port-53 conflict | automatically | you run one command | automatically |
+| Upgrade | re-run the installer | `docker compose pull && up -d` | rebuild and re-run |
+
+All three end up in the same place: a non-root process with
+`CAP_NET_BIND_SERVICE`, a persistent data directory, and bounded logs.
+
+**Requirements**
+
+- 64-bit Linux, `x86_64` or `aarch64`. 32-bit ARM is not a published target —
+  on a Raspberry Pi, install the 64-bit OS.
+- Docker 24+ (for the first two methods).
+- Root, because binding port 53 and editing resolver configuration both need it.
+- ~200 MB of disk for the image, plus room for the database.
+
+---
+
+## 2. Quick start — the one-line installer
+
+On the machine that will run Cogwheel:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tachyonlabshq/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 ```
 
-This will:
-1. Build ARM64 Docker image
-2. Transfer to Pi via SSH
-3. Load and start container
+Or from a checkout:
 
-### Manual Deployment
+```sh
+sudo ./scripts/install.sh
+```
 
-1. **Build Docker image:**
-   ```bash
-   docker buildx build --platform linux/arm64 -t cogwheel:arm64 --load .
+The installer:
+
+1. Checks the OS, the CPU architecture and that Docker is running.
+2. Finds whatever owns port 53 and resolves it — see
+   [§8.1](#81-port-53-is-already-in-use) for exactly what it will and will not
+   touch.
+3. Pulls the image and starts the container with host networking, a named
+   volume, dropped capabilities, a read-only root filesystem and log rotation.
+4. Waits for the container to report healthy, then **proves the resolver
+   answers a real DNS query** before declaring success.
+5. Prints the web URL and the addresses to point your router at.
+
+If any step fails it rolls back: an upgrade is reverted to the previous image,
+and a fresh install removes the container and undoes the resolver changes, so
+the host is left exactly as it was found. Your data volume is never deleted
+automatically.
+
+Useful flags:
+
+```sh
+sudo ./scripts/install.sh --help
+sudo ./scripts/install.sh --network bridge          # see §5
+sudo ./scripts/install.sh --upstream 9.9.9.9:53,149.112.112.112:53
+sudo ./scripts/install.sh --dns-port 5353           # do not take :53 at all
+sudo ./scripts/install.sh --uninstall               # see §12
+```
+
+---
+
+## 3. Docker Compose
+
+```sh
+git clone https://github.com/tachyonlabshq/Cogwheel-DNS.git
+cd Cogwheel-DNS
+cp .env.example .env
+$EDITOR .env
+
+# Resolve the port-53 conflict first — Compose cannot do this for you.
+sudo ./scripts/install.sh --fix-port-53
+
+docker compose up -d
+docker compose ps          # wait for STATUS = healthy
+```
+
+`.env.example` documents every variable. The defaults are sized for a
+Raspberry Pi 5: two CPUs, 1 GiB memory, three rotated 10 MB log files.
+
+To build locally instead of pulling a published image:
+
+```sh
+docker compose build
+docker compose up -d
+```
+
+`docker-compose.yml` defaults to **host networking**. Read
+[§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature) before changing
+it — the choice determines whether per-device block profiles work.
+
+---
+
+## 4. Native install with systemd
+
+For hosts where you do not want Docker at all.
+
+```sh
+git clone https://github.com/tachyonlabshq/Cogwheel-DNS.git
+cd Cogwheel-DNS
+sudo ./scripts/install-native.sh
+```
+
+This builds the server and the web app from source (slow on a Pi — expect
+20-40 minutes for a cold Rust build), creates a `cogwheel` system user, resolves
+the port-53 conflict, and installs
+[`deploy/cogwheel.service`](deploy/cogwheel.service).
+
+To skip the build and use a published release artifact instead:
+
+```sh
+curl -fsSLO https://github.com/tachyonlabshq/Cogwheel-DNS/releases/latest/download/cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
+sudo ./scripts/install-native.sh --tarball cogwheel-<version>-aarch64-unknown-linux-gnu.tar.gz
+```
+
+What gets installed:
+
+| Path | Contents |
+|---|---|
+| `/usr/local/bin/cogwheel-server` | the binary |
+| `/usr/local/share/cogwheel/web` | web assets (`COGWHEEL_WEB_DIST_DIR`) |
+| `/etc/cogwheel/cogwheel.env` | configuration — **safe to edit**, preserved across upgrades |
+| `/var/lib/cogwheel` | SQLite database, owned by `cogwheel:cogwheel`, mode 0750 |
+| `/etc/systemd/system/cogwheel.service` | the unit |
+
+Day-to-day:
+
+```sh
+systemctl status cogwheel
+journalctl -u cogwheel -f
+sudo systemctl restart cogwheel        # after editing cogwheel.env
+systemd-analyze security cogwheel      # review the hardening
+```
+
+The unit runs as a dedicated non-root user with `ProtectSystem=strict`,
+`NoNewPrivileges=yes`, a capability bounding set of exactly
+`CAP_NET_BIND_SERVICE`, a seccomp filter, and memory/CPU/task limits. The only
+writable path is `/var/lib/cogwheel`, created by `StateDirectory=`.
+
+---
+
+## 5. Networking: host vs bridge, and why it decides a feature
+
+Cogwheel assigns block profiles **per device**, and it identifies a device by
+the source IP address of its DNS query. Internally the resolver keeps a
+`HashMap<IpAddr, DevicePolicyConfig>`; a query whose client address is not in
+that map falls through to the global policy.
+
+So the networking mode is not a deployment detail. It decides whether
+per-device profiles, per-device statistics and security-event attribution
+work at all.
+
+### Host networking (the default)
+
+```yaml
+network_mode: host
+```
+
+- DNS sockets are bound directly on the host's interfaces. Every query arrives
+  with the real LAN client address, so per-device profiles work.
+- No NAT hop on the DNS hot path.
+- `ports:` is ignored; Cogwheel binds host `:53` and `:8080` directly, so a
+  port conflict is a hard failure rather than a silent fallback.
+- Linux only.
+
+### Bridge networking with published ports
+
+```yaml
+# ports:
+#   - "53:5353/udp"
+#   - "53:5353/tcp"
+#   - "8080:8080/tcp"
+```
+
+- Normal container isolation; works on Docker Desktop.
+- Inbound queries traverse Docker's NAT/proxy path. Depending on the host's
+  `userland-proxy` setting and iptables state, the source address the container
+  observes is frequently rewritten to the bridge gateway (`172.x.0.1`).
+  **When that happens every device looks like one client and per-device
+  profiles silently collapse to the global policy** — no error, just wrong
+  behaviour.
+- In this mode bind DNS to `5353` inside the container
+  (`COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353`) and publish it as
+  `53:5353`. No capability is then required inside the container, and you can
+  safely add `security_opt: ["no-new-privileges:true"]`.
+- Keep `COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53` — that is the port *clients*
+  use, not the port the process bound.
+
+**Do not take this on trust — measure it.** Query the resolver from a second
+machine, then check what address was recorded:
+
+```sh
+dig @<cogwheel-host> example.com          # from another device on the LAN
+curl -s http://<cogwheel-host>:8080/api/v1/security-events | head -c 400
+```
+
+If `client_ip` shows the Docker gateway rather than the querying device, switch
+to host networking, or give the container its own LAN address with a **macvlan**
+network — that preserves client IPs while keeping container isolation.
+
+---
+
+## 6. Pointing your router at Cogwheel
+
+Set DNS **on the router**, in its DHCP settings, not on each device. That way
+every client — including ones you cannot configure, like a TV or a games
+console — is covered automatically.
+
+1. Find the addresses Cogwheel is advertising. The installer prints them, the
+   dashboard shows them, and the API returns them:
+
+   ```sh
+   curl -s http://<cogwheel-host>:8080/api/v1/resolver-access
    ```
 
-2. **Export image:**
-   ```bash
-   docker save cogwheel:arm64 | gzip > cogwheel-arm64.tar.gz
-   ```
+2. Give the Pi a **static address or a DHCP reservation** first. If its address
+   changes, DNS stops working for the whole house.
 
-3. **Transfer to Pi:**
-   ```bash
-   scp cogwheel-arm64.tar.gz michaelwong@fractal.local:/tmp/
-   ```
+3. In your router: *DHCP / LAN → DNS servers* → enter the Cogwheel address.
+   Remove any other entries, or clients will silently use the other resolver
+   and bypass filtering.
 
-4. **Deploy on Pi:**
-   ```bash
-   ssh michaelwong@fractal.local
-   docker load -i /tmp/cogwheel-arm64.tar.gz
-   docker run -d \
-     --name cogwheel \
-     --restart unless-stopped \
-     -p 8080:8080 \
-     -p 53:53/udp \
-     -p 53:53/tcp \
-     -v /opt/cogwheel/data:/app/data \
-     cogwheel:arm64
-   ```
+4. **On a dual-stack network, set the IPv6 address too.** A client with an IPv6
+   resolver configured will happily ignore an IPv4-only DNS setting. This is the
+   single most common reason people think filtering "randomly stops working".
 
-### Access
+5. Renew leases (or reboot clients) so they pick up the new setting.
 
-- **Web UI:** http://fractal.local:8080
-- **DNS Server:** 192.168.86.249:53
+If your router will not let you change DNS, set it per-device instead, or have
+the router hand out Cogwheel's address as the gateway's DNS forwarder.
 
-### Configuration
+---
 
-Data persists in `/opt/cogwheel/data` on the Pi.
+## 7. Post-install verification checklist
 
-### Troubleshooting
+Run the scripted version:
 
-**SSH Authentication Failing:**
-- Ensure password is: `203237`
-- User: `michaelwong` or `pi`
-- Try: `ssh-copy-id michaelwong@fractal.local` for key-based auth
-
-**Container Won't Start:**
-```bash
-docker logs cogwheel
-docker ps -a | grep cogwheel
+```sh
+sh scripts/verify-install.sh                       # local
+sh scripts/verify-install.sh --host 10.0.0.2       # remote
+sh scripts/verify-install.sh --skip-restart        # no restart test
 ```
 
-**Port Conflicts:**
-```bash
-sudo netstat -tlnp | grep :53
-sudo netstat -tlnp | grep :8080
+It exits non-zero if anything fails, so it also works from cron or a monitor.
+
+Or check each item by hand:
+
+### Control plane
+
+```sh
+curl -fsS http://<host>:8080/health/live      # {"data":{"status":"ok"}}
+curl -fsS http://<host>:8080/health/ready     # {"data":{"status":"ready"}}
+curl -fsS http://<host>:8080/metrics | grep cogwheel_startups_total
+curl -fsS http://<host>:8080/api/v1/dashboard | head -c 200
+curl -fsSI http://<host>:8080/ | head -1      # 200 OK, the web UI
 ```
 
-### Testing Web UI
+`/health/live` and `/health/ready` are distinct endpoints. Liveness is what the
+container `HEALTHCHECK` probes. **Readiness is currently an unconditional stub**
+— it returns `ready` without probing the database or the resolver, so treat a
+200 there as "the HTTP listener is answering", not as a dependency check.
 
-After deployment, verify:
-1. Open http://fractal.local:8080 in browser
-2. Check dashboard loads with:
-   - Protection status
-   - Runtime health metrics
-   - Tailscale status (if configured)
-   - Load test controls
-   - False-positive budget display
+`/metrics` currently exposes exactly one counter, `cogwheel_startups_total`.
+The operationally interesting numbers live in `GET /api/v1/runtime`.
 
-### Phase 8 Testing
+### Resolver
 
-Run load tests from Web UI or API:
-```bash
-curl -X POST http://fractal.local:8080/api/v1/load-test \
-  -H "Content-Type: application/json" \
-  -d '{"duration_secs": 30, "qps": 100, "cache_hit_ratio": 0.7}'
+```sh
+# An allowed domain must resolve normally.
+dig @<host> example.com A +short
+#   -> a real address, e.g. 93.184.216.34
+
+# A blocked domain must resolve to the null address, not NXDOMAIN.
+dig @<host> ads.example.com A +short
+#   -> 0.0.0.0
+
+# TCP as well as UDP. Large answers fall back to TCP; if only UDP works,
+# some lookups will fail in ways that are very hard to diagnose later.
+dig @<host> example.com A +tcp +short
 ```
 
-Check false-positive budget:
-```bash
-curl http://fractal.local:8080/api/v1/false-positive-budget
+`ads.example.com` is on the bootstrap blocklist that ships with a stock
+install, so this works before you configure anything. Blocked domains return
+`0.0.0.0` (and `::` for AAAA) because the default block mode is null-IP.
+
+### Persistence
+
+State must survive a restart. If it does not, the data volume is not mounted
+where you think it is.
+
+```sh
+curl -s http://<host>:8080/api/v1/settings | head -c 200   # note the contents
+docker restart cogwheel                                    # or: systemctl restart cogwheel
+sleep 20
+curl -s http://<host>:8080/api/v1/settings | head -c 200   # must be unchanged
 ```
 
-Run Rust optimization benchmark:
-```bash
-curl http://fractal.local:8080/api/v1/benchmark/rust-opts
+`scripts/verify-install.sh` automates this properly: it writes a uniquely named
+block profile, restarts Cogwheel, confirms the record survived, and deletes it
+again.
+
+### End to end
+
+From a *different* device on the network, after pointing it at Cogwheel:
+
+```sh
+nslookup example.com
+nslookup ads.example.com      # 0.0.0.0
 ```
+
+Then open `http://<host>:8080` and confirm the dashboard shows the query.
+
+---
+
+## 8. Troubleshooting
+
+### 8.1 Port 53 is already in use
+
+**This is the most common failure, by a wide margin.** On most Linux hosts
+`systemd-resolved` runs a stub resolver on `127.0.0.53:53`, which prevents
+anything else from binding port 53.
+
+Symptoms: the container restarts in a loop, or the service fails immediately;
+logs show an address-in-use error.
+
+Diagnose:
+
+```sh
+sudo ss -lnptu '( sport = :53 )'
+```
+
+Fix, the supported way:
+
+```sh
+sudo ./scripts/install.sh --fix-port-53
+```
+
+That command:
+
+- writes `/etc/systemd/resolved.conf.d/10-cogwheel-stub-listener.conf`
+  containing `DNSStubListener=no`,
+- repairs `/etc/resolv.conf`, which on these hosts is a symlink to
+  `stub-resolv.conf` and would otherwise point the machine at a resolver that
+  no longer exists — it is repointed at `/run/systemd/resolve/resolv.conf`,
+  the uplink file listing the real upstream servers,
+- restarts `systemd-resolved`,
+- records what it changed in `/etc/cogwheel/install-state` so
+  `--uninstall` can reverse exactly those changes.
+
+`/etc/resolv.conf` is deliberately **not** pointed at Cogwheel itself. If the
+host resolved through Cogwheel and Cogwheel failed to start, the machine would
+have no DNS — and no DNS means you cannot pull an image to fix it.
+
+Doing it by hand instead:
+
+```sh
+sudo mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNSStubListener=no\n' | sudo tee /etc/systemd/resolved.conf.d/10-cogwheel-stub-listener.conf
+sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
+```
+
+**If the port is held by a real DNS server** — `dnsmasq`, `named`/BIND,
+`unbound`, CoreDNS, Knot — the installer stops and tells you, rather than
+disabling it. That is deliberate: `dnsmasq` in particular is often also serving
+DHCP, and turning it off without warning would take the network down. Stop it
+yourself when you are ready:
+
+```sh
+sudo systemctl disable --now dnsmasq     # or named / bind9 / unbound
+```
+
+On OpenWrt, set dnsmasq's port to `0` rather than disabling it, so DHCP keeps
+running.
+
+**If you would rather not take port 53 at all**, run Cogwheel on a high port
+and point clients at it explicitly:
+
+```sh
+sudo ./scripts/install.sh --dns-port 5353
+```
+
+### 8.2 The container starts but DNS does not answer
+
+```sh
+docker logs cogwheel --tail 50
+docker inspect --format '{{.State.Health.Status}}' cogwheel
+```
+
+- Check the bind address matches the networking mode. With host networking DNS
+  must bind `:53`; with bridge networking it must bind `:5353` and be published
+  as `53:5353`. A mismatch produces a healthy container that answers nothing.
+- Check a host firewall is not blocking 53:
+  `sudo ufw allow 53/udp && sudo ufw allow 53/tcp && sudo ufw allow 8080/tcp`.
+- Confirm both protocols are reachable: `dig @<host> example.com` and
+  `dig @<host> example.com +tcp`.
+
+### 8.3 Every device shows up as one client
+
+Per-device profiles are not applying and the dashboard attributes everything to
+a single address, usually `172.x.0.1`. That is the Docker bridge gateway — see
+[§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature). Switch to host
+networking or macvlan.
+
+### 8.4 The container exits with a read-only filesystem error
+
+`docker-compose.yml` sets `read_only: true`. The only writable paths are the
+data volume and a `tmpfs` at `/tmp`. If the server needs to write somewhere
+else, you will see an `EROFS` error in the logs. Set `read_only: false` to get
+running again, then please report the path it needed.
+
+### 8.5 The dashboard says "degraded" on a healthy node
+
+The `home` profile leaves both runtime-guard tolerances at `0`, so a single
+transient upstream failure — a Wi-Fi blip, one ISP resolver timeout — flips
+runtime health to degraded and it stays there. Allow a small tolerance:
+
+```sh
+COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA=2
+COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA=5
+```
+
+### 8.6 Blocklists will not update
+
+The updater fetches sources over HTTPS. Check the host clock (TLS fails on a Pi
+with a wrong date and no RTC), then check egress:
+
+```sh
+docker exec cogwheel curl -fsSI https://example.com | head -1
+timedatectl status
+```
+
+### 8.7 Web UI returns 404
+
+The server started without web assets. `COGWHEEL_WEB_DIST_DIR` must point at a
+directory containing `index.html`; the image sets `/app/web`. On a native
+install it is `/usr/local/share/cogwheel/web`. The startup log says either
+`serving bundled web assets` or `web assets not found; serving API routes only`.
+
+### 8.8 Nothing is filtered even though DNS works
+
+Clients are reaching a different resolver. Most often: the router hands out its
+own address for DNS, or IPv6 DNS is still pointing elsewhere
+([§6](#6-pointing-your-router-at-cogwheel) step 4). Check what a client
+actually uses with `resolvectl status` or `nslookup example.com`.
+
+---
+
+## 9. Configuration reference
+
+Every variable is read by the server itself. Names are exact — a typo is
+silently ignored rather than reported.
+
+| Variable | Default (`home` profile) | Notes |
+|---|---|---|
+| `COGWHEEL_PROFILE` | `home` | `dev`, `home` or `smb`. Sets the defaults below. |
+| `COGWHEEL_SERVER__HTTP_BIND_ADDR` | `0.0.0.0:8080` | Web UI and API. |
+| `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR` | `0.0.0.0:5353` | The image overrides this to `:53`. |
+| `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR` | `0.0.0.0:5353` | Keep in step with UDP. |
+| `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` | bound DNS port | The port *clients* use. Stays `53` behind a port mapping. |
+| `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | *(empty)* | Comma-separated addresses shown to users. The installers fill this in from the host's interfaces. |
+| `COGWHEEL_STORAGE__DATABASE_URL` | `sqlite://data/cogwheel.db` | `sqlite://` is stripped. Use an absolute path. |
+| `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated `host:port`; each is used for both UDP and TCP. |
+| `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
+| `COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS` | `example.com,connectivitycheck.gstatic.com` | Health-check probe targets. |
+| `COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
+| `COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
+| `COGWHEEL_WEB_DIST_DIR` | *(search path)* | Directory containing `index.html`. |
+| `RUST_LOG` | `info` | tracing filter. An `info` directive is always added, so this can only widen it. |
+
+Profile defaults:
+
+| Setting | `dev` | `home` | `smb` |
+|---|---|---|---|
+| HTTP bind | `127.0.0.1:30080` | `0.0.0.0:8080` | `0.0.0.0:8080` |
+| DNS bind | `127.0.0.1:30053` | `0.0.0.0:5353` | `0.0.0.0:53` |
+| Refresh interval | 120 s | 300 s | 600 s |
+
+There is no configuration file. Everything is environment variables.
+
+---
+
+## 10. Upgrades
+
+**Installer:** re-run it. It is idempotent, keeps the data volume, and rolls
+back to the previous image if the new one fails to become healthy.
+
+```sh
+sudo ./scripts/install.sh
+```
+
+**Compose:** pin a version in `.env` rather than tracking `latest`, so an
+upgrade is a reviewed change.
+
+```sh
+$EDITOR .env                    # COGWHEEL_IMAGE=ghcr.io/tachyonlabshq/cogwheel-dns:1.2.3
+docker compose pull
+docker compose up -d
+docker compose ps               # wait for healthy
+sh scripts/verify-install.sh
+```
+
+To roll back, put the old tag in `.env` and repeat. The volume is untouched, so
+state carries over.
+
+**Native:**
+
+```sh
+git pull
+sudo ./scripts/install-native.sh
+```
+
+`/etc/cogwheel/cogwheel.env` is preserved unless you pass `--force-env`.
+
+Always take a backup before an upgrade ([§11](#11-backup-and-restore)) and run
+the verification checklist afterwards ([§7](#7-post-install-verification-checklist)).
+
+---
+
+## 11. Backup and restore
+
+### Recommended: back up the data directory
+
+This captures everything — the full SQLite database, not a subset.
+
+**Docker (named volume):**
+
+```sh
+# Stop first so SQLite is not mid-write.
+docker stop cogwheel
+docker run --rm -v cogwheel-data:/data -v "$PWD:/backup" debian:bookworm-slim \
+  tar -czf /backup/cogwheel-backup-$(date +%F).tar.gz -C /data .
+docker start cogwheel
+```
+
+Restore:
+
+```sh
+docker stop cogwheel
+docker run --rm -v cogwheel-data:/data -v "$PWD:/backup" debian:bookworm-slim \
+  sh -c 'rm -rf /data/* && tar -xzf /backup/cogwheel-backup-YYYY-MM-DD.tar.gz -C /data && chown -R 10001:10001 /data'
+docker start cogwheel
+```
+
+**Native:**
+
+```sh
+sudo systemctl stop cogwheel
+sudo tar -czf "cogwheel-backup-$(date +%F).tar.gz" -C /var/lib/cogwheel .
+sudo systemctl start cogwheel
+```
+
+Verify a restore with [§7](#7-post-install-verification-checklist) — a backup
+you have never restored is a hypothesis, not a backup.
+
+### The backup API is partial — know what it does not cover
+
+```sh
+curl -s http://<host>:8080/api/v1/backup > cogwheel-config.json
+```
+
+`GET /api/v1/backup` exports **sources, devices, classifier settings and
+notification settings only**. It omits block profiles, service toggles, sync
+settings, rulesets, audit events and security events.
+
+`POST /api/v1/backup/restore` is **additive, not a replacement**: existing
+records that are absent from the backup survive, and at present the classifier
+and notification sections of the payload are not durably applied. Treat the API
+as a convenience export of source and device lists, and use the data-directory
+backup above as your actual disaster-recovery path.
+
+The exported JSON contains the notification webhook URL in cleartext. Store it
+accordingly.
+
+---
+
+## 12. Uninstall
+
+**Installer / Compose:**
+
+```sh
+sudo ./scripts/install.sh --uninstall            # keeps your data volume
+sudo ./scripts/install.sh --uninstall --purge    # deletes it too
+```
+
+This removes the container, deletes
+`/etc/systemd/resolved.conf.d/10-cogwheel-stub-listener.conf`, restores
+`/etc/resolv.conf` to what it pointed at before, restarts `systemd-resolved`,
+and removes `/etc/cogwheel`. Only changes recorded in
+`/etc/cogwheel/install-state` are reversed — nothing else on the host is
+touched.
+
+If you installed with `--container`/`--volume`, pass the same flags to
+`--uninstall`.
+
+For a pure Compose deployment:
+
+```sh
+docker compose down                              # keeps the volume
+docker compose down -v                           # deletes it
+sudo ./scripts/install.sh --uninstall            # revert the resolver changes
+```
+
+**Native:**
+
+```sh
+sudo ./scripts/install-native.sh --uninstall
+sudo ./scripts/install-native.sh --uninstall --purge   # also removes /var/lib/cogwheel
+```
+
+Afterwards, confirm the host still resolves and remember to point your router's
+DNS back at something else:
+
+```sh
+getent hosts example.com
+```
+
+---
+
+## 13. Local development
+
+No Docker, no privileged ports, loopback only:
+
+```sh
+COGWHEEL_PROFILE=dev cargo run -p cogwheel-server
+```
+
+That binds `127.0.0.1:30080` for HTTP and `127.0.0.1:30053` for DNS. Test it:
+
+```sh
+curl -s http://127.0.0.1:30080/health/live
+dig @127.0.0.1 -p 30053 example.com +short
+```
+
+Run the web app against it with hot reload:
+
+```sh
+cd apps/cogwheel-web
+npm ci
+npm run dev
+```
+
+Before opening a pull request:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo audit
+cargo deny check
+
+npm --prefix apps/cogwheel-web ci
+npm --prefix apps/cogwheel-web run lint
+npm --prefix apps/cogwheel-web run build
+
+shellcheck scripts/*.sh
+docker buildx build --check .
+```
+
+CI runs all of these. See [docs/release-policy.md](docs/release-policy.md) for
+how releases are cut.

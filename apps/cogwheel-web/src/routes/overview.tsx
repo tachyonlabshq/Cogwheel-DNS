@@ -101,7 +101,11 @@ export function OverviewScreen() {
       failureTitle: "Could not refresh sources",
     });
 
-  const primaryTarget = data.resolverAccess.dns_targets[0] ?? "fractal.local";
+  // If the server reports no advertised targets, fall back to whatever address the operator is
+  // already reaching this page on — that is almost always the resolver's address too, and it is
+  // always true for the person reading it, unlike a hardcoded hostname.
+  const primaryTarget =
+    data.resolverAccess.dns_targets[0] ?? window.location.hostname;
   const ipv4Target = data.resolverAccess.dns_targets.find((target) => IPV4.test(target)) ?? primaryTarget;
   const ipv6Target = data.resolverAccess.dns_targets.find(looksIpv6);
 

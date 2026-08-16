@@ -1,21 +1,164 @@
+# Cogwheel DNS — production Compose deployment.
+#
+#   cp .env.example .env      # edit it, then:
+#   docker compose up -d
+#   docker compose ps         # wait for STATUS = healthy
+#
+# Every tunable lives in .env. Nothing here should need editing except the
+# network mode block below, which is a deliberate, documented choice.
+
+name: cogwheel
+
 services:
-  cogwheel-server:
+  cogwheel:
+    # Pull a published multi-arch image by default. `docker compose build` still
+    # works and will use the local Dockerfile; `COGWHEEL_IMAGE` in .env pins the
+    # version you actually want in production (never leave it at `latest` on a
+    # box you care about — see docs/release-policy.md).
+    image: ${COGWHEEL_IMAGE:-ghcr.io/tachyonlabshq/cogwheel-dns:latest}
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: ${COGWHEEL_CONTAINER_NAME:-cogwheel}
+    restart: unless-stopped
+
+    # =====================================================================
+    # NETWORKING — read this before changing it.
+    #
+    # Cogwheel assigns block profiles per device, and it identifies a device
+    # by the source IP of its DNS query
+    # (cogwheel-dns-core keys `devices_by_ip: HashMap<IpAddr, DevicePolicyConfig>`;
+    # a query whose client address does not match a known device falls through
+    # to the global policy). So whether the container can see the *real* client
+    # address is not a networking detail — it decides whether per-device
+    # profiles work at all.
+    #
+    # ---------------------------------------------------------------------
+    # Option A (default, below): host networking.
+    #
+    #   + The DNS sockets are bound directly on the host's interfaces, so the
+    #     source address on every query is the actual LAN client. Per-device
+    #     profiles, per-device stats, and security-event attribution all work.
+    #   + No NAT hop on the DNS hot path.
+    #   - The container shares the host network namespace: `ports:` is ignored,
+    #     there is no port isolation, and Cogwheel binds host :53 and :8080
+    #     directly. Anything else already on those ports is a hard conflict
+    #     (scripts/install.sh handles the systemd-resolved case).
+    #   - Linux only. Docker Desktop on macOS/Windows does not implement it.
+    #
+    # ---------------------------------------------------------------------
+    # Option B: bridge networking with published ports (commented out below).
+    #
+    #   + Normal container isolation; only the ports you publish are exposed;
+    #     works on Docker Desktop.
+    #   - Inbound queries traverse Docker's NAT/proxy path. Depending on the
+    #     host's userland-proxy setting and iptables state, the source address
+    #     the container observes is frequently rewritten to the bridge gateway
+    #     (172.x.0.1). When that happens EVERY device looks like one client and
+    #     per-device profiles silently collapse to the global policy — no error,
+    #     just wrong behaviour.
+    #
+    #   Verify before trusting it: query the resolver from a second machine,
+    #   then check what address was recorded:
+    #     curl -s http://<node>:8080/api/v1/security-events | grep client_ip
+    #     docker compose logs cogwheel | head
+    #   If you see the gateway address instead of the querying host, use
+    #   Option A, or a macvlan network (which gives the container its own LAN
+    #   address and preserves client IPs while keeping isolation).
+    #
+    # To switch to Option B: delete `network_mode: host`, uncomment the `ports`
+    # block, and in .env set the DNS bind addresses to :5353 so no capability
+    # is needed inside the container.
+    # =====================================================================
     network_mode: host
-    environment:
-      COGWHEEL_SERVER__HTTP_BIND_ADDR: 0.0.0.0:8080
-      COGWHEEL_SERVER__DNS_UDP_BIND_ADDR: 0.0.0.0:30053
-      COGWHEEL_SERVER__DNS_TCP_BIND_ADDR: 0.0.0.0:30053
-      COGWHEEL_SERVER__ADVERTISED_DNS_PORT: 53
-      COGWHEEL_STORAGE__DATABASE_URL: sqlite://data/cogwheel.db
-      COGWHEEL_UPSTREAM__SERVERS: 1.1.1.1:53,1.0.0.1:53
+    # ports:
+    #   - "${COGWHEEL_DNS_HOST_PORT:-53}:5353/udp"
+    #   - "${COGWHEEL_DNS_HOST_PORT:-53}:5353/tcp"
+    #   - "${COGWHEEL_HTTP_HOST_PORT:-8080}:8080/tcp"
+
+    env_file:
+      - .env
+
     volumes:
-      - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/cogwheel-server", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      # Named volume, not a bind mount: the image creates /app/data owned by
+      # uid 10001, and Docker copies that ownership onto a fresh named volume
+      # automatically. A bind mount would come up root-owned and the non-root
+      # process could not open the SQLite database.
+      # Back it up with `docker run --rm -v cogwheel-data:/data ...` — see
+      # DEPLOYMENT.md § Backup and restore.
+      - cogwheel-data:/app/data
+
+    # =====================================================================
+    # HARDENING
+    # =====================================================================
+    # Drop everything, then add back only the one capability needed to bind
+    # :53. The image also carries a file capability on the binary, which is
+    # what actually transfers the privilege to the non-root process.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+    # `no-new-privileges` is deliberately NOT set here. prctl(2) documents
+    # no_new_privs as rendering file capabilities non-functional, and the :53
+    # bind depends on a file capability. In practice it was still granted on
+    # Linux 6.18 (CapEff 0x400 with NoNewPrivs 1), but that is not uniform
+    # across kernels and the failure mode is "DNS does not come up".
+    #   - Binding :5353 under Option B needs no capability, so enable it there:
+    #       security_opt: ["no-new-privileges:true"]
+    #   - To enable it under Option A, add the line and confirm the container
+    #     reaches `healthy` and `dig @<node> example.com` still answers.
+
+    # The only path the process writes to is /app/data, which is a volume and
+    # therefore still writable. Everything else is immutable at runtime.
+    # If the container ever exits with a read-only filesystem (EROFS) error,
+    # set this to false, report it, and add the path to `tmpfs` instead.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+
+    # A resolver holds a socket per in-flight upstream query; the default 1024
+    # is low for a household under load.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    # Run the binary under an init (tini). Without it the server is PID 1, and
+    # PID 1 does not get default signal dispositions from the kernel — a
+    # SIGTERM with no explicit handler is discarded and every `docker compose
+    # down` waits out the full grace period before SIGKILL. With init: true the
+    # signal is delivered normally and shutdown is prompt.
+    init: true
+    stop_grace_period: ${COGWHEEL_STOP_GRACE_PERIOD:-20s}
+
+    # =====================================================================
+    # RESOURCES — defaults sized for a Raspberry Pi 5 (4 cores, 4–16 GB).
+    # Two of four cores and 1 GiB leaves ample headroom for the OS on a 4 GB
+    # Pi while giving the resolver and the classifier room to work.
+    # =====================================================================
+    deploy:
+      resources:
+        limits:
+          cpus: ${COGWHEEL_CPU_LIMIT:-2.0}
+          memory: ${COGWHEEL_MEMORY_LIMIT:-1024M}
+        reservations:
+          memory: ${COGWHEEL_MEMORY_RESERVATION:-192M}
+
+    # =====================================================================
+    # LOGGING — bounded on purpose. Unrotated json-file logs on an appliance
+    # will eventually fill the SD card, and a full disk takes DNS down for the
+    # whole house. 3 x 10 MB is a few days of query tracing at home volume.
+    # =====================================================================
+    logging:
+      driver: json-file
+      options:
+        max-size: ${COGWHEEL_LOG_MAX_SIZE:-10m}
+        max-file: "${COGWHEEL_LOG_MAX_FILE:-3}"
+
+    # healthcheck is inherited from the image (HEALTHCHECK in the Dockerfile
+    # probes GET /health/live). Overriding it here would only duplicate it.
+
+volumes:
+  cogwheel-data:
+    name: ${COGWHEEL_VOLUME_NAME:-cogwheel-data}
