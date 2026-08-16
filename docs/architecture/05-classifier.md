@@ -2108,3 +2108,237 @@ Rollback paths, all of which end at a known-good state:
 6. Every promote, reject and rollback writes an audit event, so a bad night is diagnosable after the
    fact rather than mysterious.
 7. `adaptation_enabled = false` is honoured immediately and is the documented recovery step.
+
+---
+
+## 11. Testing and benchmarks
+
+All tests are inline `#[cfg(test)] mod tests` — the workspace has no `tests/` directory and
+`02-core-crates.md` §10 documents that as the convention. Tests may use `.expect("message")`; non-test
+code may not (`02-core-crates.md` §9.2, rubric 1.6).
+
+### 11.1 Committed test data
+
+| File | Size | Contents |
+| --- | ---: | --- |
+| `crates/cogwheel-classifier/data/adclass-base-v1.cwm` | 4.7 MB | the shipped base model — makes every quality test hermetic |
+| `crates/cogwheel-classifier/data/fallback-model.cwm` | ~45 KB | `include_bytes!`-embedded degraded model |
+| `crates/cogwheel-classifier/data/holdout.tsv` | ~600 KB | 20 000 rows `domain \t label \t category \t split`, **drawn only from Split A's test buckets (900–999)** |
+| `crates/cogwheel-classifier/data/golden_features.tsv` | ~120 KB | 200 domains × full expected feature output |
+| `crates/cogwheel-classifier/data/public_suffix_list.dat` | ~150 KB | ICANN section snapshot, date + SHA-256 in the header comments |
+
+Committing a 4.7 MB binary is deliberate: without it the model-quality regression test would need a
+network fetch, which cannot run in CI here, and rubric 5.5 requires the test to exist and pass.
+
+### 11.2 Golden-vector tests for feature extraction
+
+`golden_features.tsv` columns (tab-separated):
+
+```
+raw_input, normalized, public_suffix, registrable, label_count,
+dense_00..dense_31 (raw f32, formatted "{:.6}"),
+bin_00..bin_31 (u8),
+ngram_count, first8_buckets (comma-separated u32),
+matched_tokens (comma-separated indices), suffix_bucket
+```
+
+The 200 rows cover, at minimum: plain 2-label names; deep subdomains; `co.uk` and `s3.amazonaws.com`
+(multi-label suffixes); a PSL wildcard rule and its exception; trailing dots (one and three); uppercase;
+`xn--` labels; underscores; all-digit labels; 63-byte labels; a 253-byte name; a name with 20 labels
+(exercising the 16-label cap); a name that trips `MAX_FEATURES`; every one of the 96 ad-tokens at
+least once; the empty string, `"."`, `"..."`, `"a"`, and three malformed inputs expected to produce
+specific `NormalizeError` variants.
+
+```rust
+#[test] fn golden_feature_vectors_match()      // exact equality; f32 compared as formatted strings
+#[test] fn feature_extraction_is_deterministic() // 10 000 domains × 3 runs → identical bytes
+#[test] fn normalize_rejects_hostile_input()   // fuzz-ish: 100 000 pseudorandom byte strings, never panics
+#[test] fn public_suffix_matches_psl_algorithm() // the PSL's own published test vectors
+```
+
+**If a golden test fails, the model is invalidated.** Say so in a comment at the top of the file: the
+correct response is either to revert the feature change or to retrain and regenerate the goldens in
+the same commit, never to edit the expected values.
+
+### 11.3 Model format and inference unit tests
+
+```rust
+#[test] fn model_roundtrips_through_format()          // write → read → identical weights
+#[test] fn quantization_roundtrip_error_is_bounded()  // max |W − deq(q(W))| / |W| <= 0.022
+#[test] fn scale_codebook_is_monotonic_and_zero_reserved()
+#[test] fn tier1_and_tier2_logits_agree()             // 10 000 domains, |Δ| < 1e-4
+#[test] fn explanation_contributions_sum_to_logit()   // |residual| < 1e-4 for 10 000 domains
+#[test] fn rejects_bad_magic()
+#[test] fn rejects_future_format_version()
+#[test] fn rejects_unknown_flag_bits()
+#[test] fn rejects_truncated_file()                   // every prefix length from 0..200
+#[test] fn rejects_corrupt_checksum()                 // flip one bit at 50 random offsets
+#[test] fn rejects_section_length_overflow()          // body_len = u64::MAX
+#[test] fn rejects_duplicate_and_missing_sections()
+#[test] fn rejects_non_power_of_two_buckets()
+#[test] fn rejects_non_finite_weights()
+#[test] fn rejects_oversized_file()                   // 33 MiB of zeros
+#[test] fn model_load_never_panics_on_random_bytes()  // 20 000 pseudorandom buffers, all Err
+```
+
+Every negative case asserts a **specific** `ModelError` variant, not merely `is_err()`.
+
+### 11.4 Model-quality regression test (rubric 5.3, 5.5)
+
+```rust
+#[test]
+fn base_model_meets_quality_floors() {
+    let model  = Model::from_bytes(include_bytes!("../data/adclass-base-v1.cwm"))
+        .expect("base model loads");
+    let rows   = holdout::load(include_str!("../data/holdout.tsv"));
+    let scored = rows.iter().map(|r| (score(&model, &r.domain), r.label)).collect::<Vec<_>>();
+
+    let roc = metrics::roc_auc(&scored);
+    let pr  = metrics::pr_auc(&scored);
+    assert!(roc >= 0.955, "ROC-AUC {roc:.4} below the 0.955 floor");
+    assert!(pr  >= 0.930, "PR-AUC {pr:.4} below the 0.930 floor");
+
+    for (sens, max_fpr, min_recall) in [
+        (Sensitivity::Low,      0.0015, 0.55),
+        (Sensitivity::Balanced, 0.0060, 0.82),
+        (Sensitivity::High,     0.0240, 0.92),
+    ] {
+        let t = model.threshold_for(sens);
+        let (fpr, recall) = metrics::fpr_recall_at(&scored, t);
+        assert!(fpr    <= max_fpr,    "{sens:?}: FPR {fpr:.5} exceeds {max_fpr}");
+        assert!(recall >= min_recall, "{sens:?}: recall {recall:.4} below {min_recall}");
+    }
+    assert!(metrics::expected_calibration_error(&scored, 10) <= 0.05);
+}
+```
+
+Floors are set **1.2× looser than the target FPRs** (0.1 %/0.5 %/2.0 % → 0.15 %/0.6 %/2.4 %) so
+the holdout's finite size (16 000 negatives → one negative above threshold is 0.00625 % of FPR) does
+not produce a flaky test, while still failing hard on a real regression. The floors are absolute
+numbers, not "compare to last run" — a committed model either clears them or does not ship.
+
+Companion tests:
+
+```rust
+#[test] fn holdout_is_disjoint_from_training()   // every holdout registrable hashes into 900..=999
+#[test] fn holdout_has_the_declared_class_balance() // 4 000 positives, 16 000 negatives
+#[test] fn fallback_model_beats_the_old_heuristic() // ROC-AUC >= 0.90 on the same holdout
+```
+
+### 11.5 Budget tests
+
+```rust
+#[test] fn model_file_is_within_budget()   { assert!(BASE_MODEL_BYTES.len() <= 8_000_000); }
+#[test] fn resident_memory_is_within_budget() {
+    let c = Classifier::new(base_model(), Default::default(), Default::default()).0;
+    assert!(c.resident_bytes() <= 16 * 1024 * 1024, "{} bytes", c.resident_bytes());
+}
+#[test] fn slot_is_exactly_32_bytes()      { assert_eq!(std::mem::size_of::<Slot>(), 32); }
+#[test] fn verdict_cache_capacity_is_fixed() {
+    // insert 1_000_000 distinct domains; assert resident_bytes() never grows
+}
+#[test] fn queue_never_grows_past_capacity() {
+    // submit 100_000 domains with the worker paused; assert every excess submit returns
+    // Dropped(QueueFull) and that resident_bytes() is unchanged
+}
+```
+
+`Classifier::resident_bytes()` is a real sum of owned allocation sizes (each `Box<[T]>`'s
+`len * size_of::<T>()`, the shard arrays, the queue's capacity), not an estimate — it is public API
+so the `/api/v1/classifier/model` endpoint can report it.
+
+### 11.6 Hot-path safety tests
+
+```rust
+#[test] fn lookup_and_submit_are_synchronous() {
+    // Compile-time proof: these coercions fail to build if either becomes `async fn`.
+    let _: fn(&Classifier, &str) -> VerdictLookup  = Classifier::lookup;
+    let _: fn(&Classifier, &str) -> SubmitOutcome  = Classifier::submit;
+}
+
+#[test] fn lookup_does_not_allocate() {
+    // test-only counting GlobalAlloc; 100 000 lookups must produce 0 allocations
+}
+
+#[tokio::test] async fn hot_path_is_unaffected_by_a_saturated_queue() {
+    // worker paused, queue full; 10 000 handle_wire_query cache hits
+    // assert total elapsed < 10_000 * 50 µs and that every response is correct
+}
+
+#[tokio::test] async fn protect_mode_blocks_on_the_second_sighting() {
+    // 1st query: allowed (verdict Unknown) ; drain the worker ; 2nd query: blocked
+}
+
+#[tokio::test] async fn protect_mode_never_blocks_a_protected_domain() {
+    // force a verdict of 1.0 for every PROTECTED_SUFFIXES entry through the cache API;
+    // assert the response is not a block
+}
+
+#[tokio::test] async fn paused_protection_disables_classifier_blocking() {}
+#[tokio::test] async fn device_bypass_disables_classifier_blocking() {}
+#[tokio::test] async fn monitor_mode_never_blocks() {}
+#[tokio::test] async fn off_mode_does_not_enqueue() {}
+```
+
+The last four close the gap flagged in `01-backend-api.md` §10.2: *"`Monitor` and `Protect` are
+behaviourally identical — the classifier can never block a query."* After this change they differ,
+and the difference is pinned by tests.
+
+### 11.7 Allowlist tests
+
+```rust
+#[test] fn every_protected_entry_matches_itself_and_its_subdomains()
+#[test] fn protected_matching_respects_dot_boundaries()   // "notapple.com" is NOT protected
+#[test] fn protected_list_is_sorted_and_has_no_duplicates()
+#[test] fn protected_list_entries_are_valid_domains()     // each parses via NormalizedDomain
+#[test] fn scoring_a_protected_domain_yields_zero()       // full pipeline, all 150 entries + "www." forms
+```
+
+### 11.8 Training-pipeline tests (no network)
+
+Fed by small committed fixtures (`data/fixtures/*.txt`, a few KB each) that reproduce every real
+format and every rejection case observed live:
+
+```rust
+#[test] fn hosts_parser_skips_localhost_noise()
+#[test] fn hosts_parser_handles_multiple_aliases()
+#[test] fn adblock_parser_accepts_only_domain_anchored_rules()
+#[test] fn adblock_parser_rejects_domain_modifier_rules()      // the FP generator
+#[test] fn adblock_parser_rejects_cosmetic_and_regex_rules()
+#[test] fn adblock_parser_collects_exception_rules_separately()
+#[test] fn majestic_csv_parser_skips_the_header_row()
+#[test] fn parsers_reject_lines_over_512_bytes()
+#[test] fn parsers_terminate_on_adversarial_input()            // 10 MB single line, 1 M empty lines
+#[test] fn split_bucket_is_stable_and_uniform()                // χ² over 100 000 domains
+#[test] fn leakage_assertion_catches_a_planted_leak()
+#[test] fn conflict_policy_forces_top_10k_negative()
+#[test] fn depth_matching_reaches_the_two_point_tolerance()
+#[test] fn platt_newton_converges_on_synthetic_data()          // recovers known a,b within 1e-3
+#[test] fn roc_auc_matches_a_brute_force_reference()           // O(n²) reference on 500 points
+#[test] fn pr_auc_handles_all_ties()
+#[test] fn threshold_for_fpr_hits_the_target_on_synthetic_data()
+#[test] fn adaptation_rejects_a_candidate_that_regresses_fpr() // plant a regression, assert Rejected
+#[test] fn adaptation_delta_cannot_carry_ngram_sections()      // assert Err on a hand-built delta
+#[test] fn delta_with_wrong_base_hash_is_rejected()
+```
+
+### 11.9 Keeping CI honest about a Pi target
+
+The tension is real: CI is x86, the target is `aarch64`, and a throughput number from a shared GitHub
+runner proves very little. The rules:
+
+1. **CI asserts floors, not budgets** (§6.4 tier A). A floor that a 10-year-old x86 core clears
+   easily still catches the failure modes that actually happen — an allocation in the loop, a lock,
+   a lost inline, an accidental `format!`.
+2. **CI additionally asserts the things that are architecture-independent**: zero allocations, exact
+   feature vectors, model size, resident bytes, AUC, FPR. These are the majority of the guarantees
+   and they transfer perfectly.
+3. **A nightly `linux/arm64` job** (`docker buildx build --platform linux/arm64` + `qemu` for
+   compile checks, and a self-hosted Pi runner when available) runs the same tests with
+   `COGWHEEL_BENCH_STRICT=1`. QEMU timings are meaningless and the strict assertions are therefore
+   skipped under QEMU (detected via `/proc/cpuinfo` lacking a real `BCM`/`Cortex-A76` signature);
+   only the self-hosted runner enforces them.
+4. **The measured Pi 5 numbers live in `docs/reliability-budgets.md`** with hardware, kernel,
+   governor, commit and date. Rubric 4.10 is satisfied by that table, not by a claim in this spec.
+5. The benchmark prints `arch=` in its output line, so nobody can paste an x86 number into a Pi
+   discussion by accident.
