@@ -55,6 +55,7 @@ struct ServerState {
     federated_learning_settings: Arc<RwLock<FederatedLearningSettings>>,
     recent_dns_activity: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
     events: EventBus,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
@@ -601,6 +602,10 @@ async fn main() -> Result<()> {
     );
     startup_counter.inc();
     let registry = Arc::new(registry);
+    // Broadcast shutdown to everything that would otherwise outlive the signal: the DNS accept
+    // loops, and every open SSE stream. Without this, `with_graceful_shutdown` waits forever for
+    // an SSE connection that never ends on its own.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // Readiness is reported per subsystem; each is marked as it genuinely comes up.
     let readiness = Arc::new(cogwheel_api::Readiness::default());
     // Storage is open and migrated by the time we get here -- `Storage::connect` applies migrations
@@ -722,12 +727,17 @@ async fn main() -> Result<()> {
             tcp_bind_addr: config.server.dns_tcp_bind_addr,
         };
         let readiness = Arc::clone(&readiness);
+        let dns_shutdown = shutdown_rx.clone();
         async move {
             runtime
-                .serve_with_ready_signal(dns_config, move || {
-                    readiness.mark_dns_ready();
-                    tracing::info!("dns listeners bound");
-                })
+                .serve_with_ready_signal(
+                    dns_config,
+                    move || {
+                        readiness.mark_dns_ready();
+                        tracing::info!("dns listeners bound");
+                    },
+                    dns_shutdown,
+                )
                 .await
         }
     });
@@ -745,6 +755,7 @@ async fn main() -> Result<()> {
         federated_learning_settings: Arc::new(RwLock::new(default_federated_learning_settings())),
         recent_dns_activity,
         events,
+        shutdown: shutdown_rx.clone(),
         protected_domains,
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
@@ -864,8 +875,18 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Fan the signal out the moment it arrives, so the DNS listeners and every open SSE stream
+    // begin winding down at the same time the HTTP server stops accepting.
+    let shutdown_signal = async move {
+        shutdown.await;
+        let _ = shutdown_tx.send(true);
+    };
+
+    // Borrow the handle so the select does not consume it: after the HTTP server drains we still
+    // need to await the DNS task, and an early DNS failure must still abort startup.
+    let mut dns_handle = dns_handle;
     tokio::select! {
-        result = dns_handle => {
+        result = &mut dns_handle => {
             result.context("dns task join failure")??;
         }
         result = refresh_handle => {
@@ -873,9 +894,20 @@ async fn main() -> Result<()> {
         }
         // `with_graceful_shutdown` stops accepting new connections on the signal and waits for
         // in-flight requests to finish before returning.
-        result = axum::serve(listener, app).with_graceful_shutdown(shutdown) => {
+        result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal) => {
             result.context("http server failure")?;
         }
+    }
+
+    // The HTTP server has drained. Give the DNS listeners a bounded window to finish whatever
+    // query they were mid-way through; returning here without waiting would drop it, which is the
+    // opposite of a graceful stop. The bound matters because a stuck upstream must not stop the
+    // process from exiting -- supervisors escalate to SIGKILL.
+    match tokio::time::timeout(Duration::from_secs(5), dns_handle).await {
+        Ok(Ok(Ok(()))) => tracing::info!("dns listeners drained"),
+        Ok(Ok(Err(error))) => tracing::warn!(%error, "dns listeners stopped with an error"),
+        Ok(Err(error)) => tracing::warn!(%error, "dns task join failure during shutdown"),
+        Err(_) => tracing::warn!("dns drain timed out; exiting anyway"),
     }
 
     tracing::info!("shutdown complete");
@@ -2076,7 +2108,12 @@ async fn tailscale_exit_node(
         })
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let _ = save_tailscale_state(current_exit_node, &hostname);
+    // The exit-node change itself succeeded; failing to persist it only means the setting will not
+    // survive a restart. That is worth reporting rather than discarding -- a silently unsaved
+    // setting looks like the appliance forgot what the operator told it.
+    if let Err(error) = save_tailscale_state(current_exit_node, &hostname) {
+        tracing::warn!(%error, "tailscale exit-node state could not be persisted");
+    }
 
     state
         .storage
@@ -7244,7 +7281,14 @@ async fn events_stream(
     // The guard is moved into the closure so the subscriber count drops when the client
     // disconnects and the stream is dropped -- an SSE handler returns as soon as the stream is
     // constructed, so teardown cannot live in the handler body.
+    // An SSE stream never ends on its own, so `with_graceful_shutdown` would wait on it forever --
+    // one open browser tab was enough to make SIGTERM hang until the supervisor SIGKILLed us.
+    // Ending the stream on the shutdown signal lets the connection close and the server exit.
+    let mut shutdown = state.shutdown.clone();
     let stream = tokio_stream::wrappers::BroadcastStream::new(state.events.sender.subscribe())
+        .take_until(async move {
+            let _ = shutdown.changed().await;
+        })
         .filter_map(move |item| {
             let _guard = &guard;
             let frame = match item {

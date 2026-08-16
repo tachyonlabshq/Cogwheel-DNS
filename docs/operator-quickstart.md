@@ -73,7 +73,7 @@ dig @127.0.0.1 -p 30053 example.com +short
 | Endpoint | Meaning |
 |---|---|
 | `GET /health/live` | liveness. What the container `HEALTHCHECK` probes. |
-| `GET /health/ready` | readiness. **Currently an unconditional stub** — it does not probe the database or the resolver. |
+| `GET /health/ready` | readiness. Returns **503 until storage, policy and the DNS listeners are all up**, and names which subsystem is lagging. Gate rolling upgrades on this, not on liveness. |
 | `GET /metrics` | Prometheus text. Today this is only `cogwheel_startups_total`. |
 | `GET /api/v1/runtime` | the numbers that actually matter: cache hits, upstream failures, fallbacks, mean latencies. |
 

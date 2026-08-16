@@ -251,9 +251,12 @@ EXPOSE 8080/tcp 53/udp 53/tcp
 # check pointed at the right place. ${addr##*:} takes everything after the last
 # colon, which is correct for both "0.0.0.0:8080" and "[::]:8080".
 #
-# /health/live is the liveness probe (see DEPLOYMENT.md). /health/ready exists
-# and is documented, but it is currently an unconditional stub, so it is not a
-# stronger signal than /health/live for gating startup.
+# /health/live is the liveness probe: it answers as soon as HTTP is up, which is
+# what a container healthcheck should test. /health/ready is the stronger signal
+# (503 until storage, policy and the DNS listeners are all up) and is the one to
+# gate a rolling upgrade on -- but using it here would report the container
+# unhealthy during a slow first blocklist compile, so liveness is correct for
+# this probe. See DEPLOYMENT.md.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD ["/bin/sh", "-c", "addr=\"${COGWHEEL_SERVER__HTTP_BIND_ADDR:-0.0.0.0:8080}\"; exec curl -fsS -o /dev/null --max-time 4 \"http://127.0.0.1:${addr##*:}/health/live\""]
 

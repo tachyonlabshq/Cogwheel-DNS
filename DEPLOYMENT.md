@@ -299,10 +299,24 @@ curl -fsS http://<host>:8080/api/v1/dashboard | head -c 200
 curl -fsSI http://<host>:8080/ | head -1      # 200 OK, the web UI
 ```
 
-`/health/live` and `/health/ready` are distinct endpoints. Liveness is what the
-container `HEALTHCHECK` probes. **Readiness is currently an unconditional stub**
-— it returns `ready` without probing the database or the resolver, so treat a
-200 there as "the HTTP listener is answering", not as a dependency check.
+`/health/live` and `/health/ready` are distinct signals. Liveness is what the
+container `HEALTHCHECK` probes: it answers 200 as soon as the HTTP listener is up.
+
+**Readiness reports per-subsystem state** and returns **503 until every subsystem
+is up**, so it is safe to gate a rolling upgrade on. The body names which parts
+are ready:
+
+```json
+{"data":{"status":"ready","subsystems":{"storage":true,"policy":true,"dns_listeners":true}}}
+```
+
+- `storage` — the database is open and its migrations applied.
+- `policy` — an initial ruleset has been compiled and installed. On a cold start
+  with large blocklists this is the slow one.
+- `dns_listeners` — the UDP and TCP sockets are bound and accepting.
+
+A node that is live but not ready is running and answering HTTP, but is not yet
+filtering. Do not send it traffic.
 
 `/metrics` currently exposes exactly one counter, `cogwheel_startups_total`.
 The operationally interesting numbers live in `GET /api/v1/runtime`.

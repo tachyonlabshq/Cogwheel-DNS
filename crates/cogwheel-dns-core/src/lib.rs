@@ -270,7 +270,8 @@ impl DnsRuntime {
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
-        self.serve_with_ready_signal(config, || {}).await
+        let (_tx, never) = tokio::sync::watch::channel(false);
+        self.serve_with_ready_signal(config, || {}, never).await
     }
 
     /// Serve DNS, invoking `on_ready` once both listeners are bound.
@@ -281,6 +282,7 @@ impl DnsRuntime {
         self: Arc<Self>,
         config: DnsRuntimeConfig,
         on_ready: F,
+        shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()>
     where
         F: FnOnce() + Send + 'static,
@@ -295,17 +297,30 @@ impl DnsRuntime {
             .context("bind tcp listener")?;
         on_ready();
 
-        let udp = tokio::spawn(self.clone().accept_udp(udp_socket));
-        let tcp = tokio::spawn(self.clone().accept_tcp(tcp_listener));
+        let udp = tokio::spawn(self.clone().accept_udp(udp_socket, shutdown.clone()));
+        let tcp = tokio::spawn(self.clone().accept_tcp(tcp_listener, shutdown));
         udp.await??;
         tcp.await??;
         Ok(())
     }
 
-    async fn accept_udp(self: Arc<Self>, socket: UdpSocket) -> Result<()> {
+    async fn accept_udp(
+        self: Arc<Self>,
+        socket: UdpSocket,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<()> {
         let mut buffer = [0u8; 4096];
         loop {
-            let (size, peer) = socket.recv_from(&mut buffer).await?;
+            // Select only on the *accept* point. A query already being handled runs to completion
+            // below before the loop comes back here, so shutdown drains in-flight work rather than
+            // cancelling it mid-flight and dropping the client's answer.
+            let (size, peer) = tokio::select! {
+                result = socket.recv_from(&mut buffer) => result?,
+                _ = shutdown.changed() => {
+                    tracing::info!("udp listener stopping");
+                    return Ok(());
+                }
+            };
             let response = self
                 .handle_wire_query(&buffer[..size], Some(peer))
                 .await
@@ -318,9 +333,19 @@ impl DnsRuntime {
         }
     }
 
-    async fn accept_tcp(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+    async fn accept_tcp(
+        self: Arc<Self>,
+        listener: TcpListener,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<()> {
         loop {
-            let (stream, peer) = listener.accept().await?;
+            let (stream, peer) = tokio::select! {
+                result = listener.accept() => result?,
+                _ = shutdown.changed() => {
+                    tracing::info!("tcp listener stopping");
+                    return Ok(());
+                }
+            };
             let runtime = self.clone();
             tokio::spawn(async move {
                 if let Err(error) = runtime.handle_tcp_stream(stream, peer).await {
