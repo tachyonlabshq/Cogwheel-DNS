@@ -1,3 +1,27 @@
+//! Turning blocklist/allowlist sources into a compiled [`cogwheel_policy::RulesetArtifact`].
+//!
+//! This is a control-plane crate — it fetches over HTTP, so it is deliberately not on the DNS hot
+//! path. The pipeline it implements:
+//!
+//! 1. [`fetch_and_parse_source`] (or [`parse_source`] directly, for an already-fetched body) turns
+//!    one [`SourceDefinition`] into a [`ParsedSource`] of [`Rule`]s, tolerating bad lines rather
+//!    than failing the whole source outright.
+//! 2. [`verify_candidate`] checks a batch of [`ParsedSource`]s for signs of a bad or hostile
+//!    upstream list — see its own docs — before anything is promoted.
+//! 3. [`compile_ruleset`] / [`build_policy_engine`] flatten verified sources into a
+//!    [`RulesetArtifact`] / [`PolicyEngine`] ready to serve queries.
+//!
+//! [`synthetic_source`] produces a [`ParsedSource`] outside this pipeline, for rules that were
+//! never fetched from anywhere.
+//!
+//! # Untrusted input
+//!
+//! A source's body is attacker-influenced: the operator picks the URL, but whoever controls that
+//! URL controls the payload. [`fetch_and_parse_source`] enforces [`MAX_SOURCE_BODY_BYTES`] for
+//! exactly this reason — see its docs for the incident that established the bound.
+
+#![warn(missing_docs)]
+
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use cogwheel_policy::{
@@ -11,39 +35,75 @@ use std::collections::HashSet;
 use url::Url;
 use uuid::Uuid;
 
+/// The line format a [`SourceDefinition`] should be parsed as.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SourceKind {
+    /// One domain per line, blocked exactly (no wildcards).
     Domains,
+    /// `/etc/hosts` format (`<ip> <hostname> ...`); only the hostname field is used.
     Hosts,
+    /// Adblock Plus filter syntax (`||domain^` blocks, `@@` exceptions). Modifier rules (`$...`)
+    /// and path/regex rules are rejected rather than approximated.
     Adblock,
 }
 
+/// A configured blocklist/allowlist source, as the operator defined it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceDefinition {
+    /// Stable identifier for this source.
     pub id: Uuid,
+    /// Operator-facing display name; also stamped onto every [`Rule`] it produces, via
+    /// [`Rule::source`], for attribution in a matched [`cogwheel_policy::Decision`].
     pub name: String,
+    /// Where to fetch the list from. A `data:` URL marks a source with an inline body rather than
+    /// a remote fetch.
     pub url: Url,
+    /// Line format to parse the fetched body as.
     pub kind: SourceKind,
+    /// Whether this source currently contributes rules. Disabling is expected to be enforced by
+    /// the caller (e.g. by not including the source in a fetch batch) rather than by this crate.
     pub enabled: bool,
+    /// Free-form, lowercased name of the policy profile this source belongs to. Sources sharing a
+    /// profile are compiled into one named [`PolicyEngine`] that a device can be pinned to.
     pub profile: String,
+    /// Which invalid-line-ratio threshold this source is held to; see [`verify_candidate`] for
+    /// the mapping from strictness name to threshold.
     pub verification_strictness: String,
 }
 
+/// One source's rules after fetching and parsing, ready to be checked by [`verify_candidate`]
+/// and folded into a ruleset by [`compile_ruleset`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedSource {
+    /// The source this was parsed from, or the synthetic definition built by
+    /// [`synthetic_source`].
     pub source: SourceDefinition,
+    /// When parsing happened (not necessarily when the body was fetched over the network).
     pub fetched_at: DateTime<Utc>,
+    /// Reserved for conditional-GET support; always `None` today, since fetching neither sends
+    /// nor records an ETag.
     pub etag: Option<String>,
+    /// Hex SHA-256 of the input: the raw body bytes for a fetched source, or the rules themselves
+    /// for a synthetic one (see [`synthetic_source`]).
     pub checksum: String,
+    /// Rules successfully parsed from this source.
     pub rules: Vec<Rule>,
+    /// Number of lines that failed to parse as a rule and were skipped rather than aborting the
+    /// parse. Feeds the invalid-line ratio checked by [`verify_candidate`].
     pub invalid_lines: usize,
 }
 
+/// Outcome of [`verify_candidate`] for a batch of parsed sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationResult {
+    /// `true` only when `notes` is empty. `false` means this candidate must **not** be promoted
+    /// to the live ruleset.
     pub passed: bool,
+    /// Aggregate invalid-line ratio across every source checked.
     pub invalid_ratio: f32,
+    /// Protected domains that this candidate would block if it were promoted.
     pub blocked_protected_domains: Vec<String>,
+    /// Human-readable reasons the candidate failed verification. Empty if and only if `passed`.
     pub notes: Vec<String>,
 }
 
@@ -60,6 +120,17 @@ static SYNTHETIC_SOURCE_URL: std::sync::LazyLock<Url> = std::sync::LazyLock::new
     Url::parse("data:text/plain,").expect("synthetic source URL literal is valid")
 });
 
+/// Build a [`ParsedSource`] from rules that were assembled in memory rather than fetched.
+///
+/// A "synthetic" source is one with no upstream body at all — currently used for per-device
+/// service toggles (`synthetic_source("service-toggles", ...)` in `apps/cogwheel-server`), which
+/// compile to [`Rule`]s the same way a fetched blocklist does but have nothing to download. It
+/// carries a placeholder `data:` URL, `SourceKind::Domains`, `profile: "shared"` and
+/// `verification_strictness: "balanced"`, and afterward is indistinguishable from a fetched
+/// source to everything downstream ([`verify_candidate`], [`compile_ruleset`]).
+///
+/// `checksum` is computed from the rules themselves (the same `action:pattern:source` scheme
+/// [`RulesetArtifact::new`] uses for hashing), since there is no body to hash.
 pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
     let source = SourceDefinition {
         id: Uuid::new_v4(),
@@ -103,6 +174,14 @@ pub async fn fetch_and_parse_source(
     Ok(parse_source(source, &body))
 }
 
+/// Parse a fetched (or synthetic) body into rules, tolerating bad lines instead of failing.
+///
+/// Blank lines and lines starting with `#` or `!` are skipped. Every other line is handed to the
+/// parser for `source.kind`; a line the parser rejects increments
+/// [`ParsedSource::invalid_lines`] instead of aborting the parse, so one malformed line in an
+/// otherwise-good list does not lose the rest of it. `SourceKind::Domains` bodies never reject a
+/// line, so their `invalid_lines` is always `0`. See [`verify_candidate`] for how the invalid
+/// count is later used to decide whether the result is trustworthy.
 pub fn parse_source(source: SourceDefinition, body: &str) -> ParsedSource {
     let mut rules = Vec::new();
     let mut invalid_lines = 0usize;
@@ -138,6 +217,29 @@ pub fn parse_source(source: SourceDefinition, body: &str) -> ParsedSource {
     }
 }
 
+/// Check freshly parsed sources for signs of a bad or hostile upstream list before they are
+/// promoted into a live ruleset.
+///
+/// This is the gate between "we downloaded a list" and "a household's DNS enforces it" — a
+/// corrupted mirror, a truncated download, or a compromised upstream is meant to fail here rather
+/// than silently become the running ruleset. Two independent checks feed [`VerificationResult`]:
+///
+/// * **Invalid-line ratio.** Each source's `invalid_lines / (rules + invalid_lines)` is compared
+///   against a threshold chosen by that source's `verification_strictness`
+///   (`"strict"` → 5%, `"relaxed"` → 40%, anything else, including `"balanced"`, → 20%); the
+///   ratio aggregated across all sources is separately compared against a hardcoded 20%. A high
+///   ratio usually means the parser and the list's actual format disagree, or the list is
+///   truncated or garbled.
+/// * **Protected-domain safety.** Every parsed rule is compiled into a throwaway
+///   [`PolicyEngine`] (empty protected set, [`BlockMode::NullIp`]), and each domain in the
+///   caller's `protected_domains` is evaluated against it. Any that comes back
+///   [`DecisionKind::Blocked`] is reported in
+///   [`VerificationResult::blocked_protected_domains`] — this is what stops a bad blocklist from
+///   taking out a router's captive-portal check or an OS's update servers.
+///
+/// [`VerificationResult::passed`] is `notes.is_empty()` — strictly "nothing to report". `false`
+/// means the candidate must **not** be promoted; the caller should keep serving the current
+/// ruleset.
 pub fn verify_candidate(
     parsed: &[ParsedSource],
     protected_domains: &HashSet<String>,
@@ -202,6 +304,10 @@ pub fn verify_candidate(
     }
 }
 
+/// Flatten parsed sources into one [`RulesetArtifact`], discarding per-source metadata.
+///
+/// Does not call [`verify_candidate`] itself — callers are expected to verify a candidate before
+/// compiling the artifact that will actually be served.
 pub fn compile_ruleset(
     parsed: Vec<ParsedSource>,
     protected_domains: HashSet<String>,
@@ -214,6 +320,11 @@ pub fn compile_ruleset(
     RulesetArtifact::new(rules, protected_domains, block_mode)
 }
 
+/// Build a ready-to-serve [`PolicyEngine`] directly from parsed sources, via [`compile_ruleset`].
+///
+/// Convenience for callers that already trust the input (e.g. bootstrapping the first ruleset)
+/// and do not need the intermediate [`RulesetArtifact`]. Like [`compile_ruleset`], this does not
+/// call [`verify_candidate`].
 pub fn build_policy_engine(
     parsed: Vec<ParsedSource>,
     protected_domains: HashSet<String>,
