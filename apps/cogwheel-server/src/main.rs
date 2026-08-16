@@ -779,6 +779,12 @@ async fn main() -> Result<()> {
     // Publish runtime health to connected control planes on a slow cadence. Without this the
     // client's `health` listener was dead code: it subscribed to an event the server never emitted,
     // so the Activity screen could never show that the resolver had degraded.
+    //
+    // This uses the PASSIVE signal, `current_runtime_health`, which only reads counters already in
+    // memory. It must never call `active_runtime_health_check`: that one sends live DNS probes
+    // upstream, writes an audit row, and can fire a webhook. On a 30s timer that would mean ~2,880
+    // audit rows a day forever -- storage has no retention or vacuum -- plus constant probe traffic
+    // and alert noise, on a device whose durable storage is usually an SD card.
     tokio::spawn({
         let state = app_state.clone();
         let events = state.events.clone();
@@ -786,13 +792,10 @@ async fn main() -> Result<()> {
             let mut ticker = interval(Duration::from_secs(30));
             loop {
                 ticker.tick().await;
-                let (degraded, notes) = match active_runtime_health_check(&state).await {
-                    Ok(health) => (health.degraded, health.notes),
-                    Err(error) => (true, vec![format!("health check failed: {error}")]),
-                };
+                let health = current_runtime_health(&state);
                 events.publish(StreamEvent::Health(Box::new(StreamHealthEvent {
-                    degraded,
-                    notes,
+                    degraded: health.degraded,
+                    notes: health.notes,
                     observed_at: chrono::Utc::now().to_rfc3339(),
                 })));
             }

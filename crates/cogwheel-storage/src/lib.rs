@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.sql");

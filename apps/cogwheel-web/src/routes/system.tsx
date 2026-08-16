@@ -55,7 +55,7 @@ import { TextField } from "@/components/app/text-field";
 import { FieldRow, FormField } from "@/components/app/form-field";
 import { StatusIndicator, StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
-import { ErrorState, NoticeBanner } from "@/components/app/states";
+import { AsyncRegion, ErrorState, NoticeBanner } from "@/components/app/states";
 
 const TABS = ["diagnostics", "sync", "backup", "audit"] as const;
 type TabId = (typeof TABS)[number];
@@ -81,7 +81,10 @@ export function SystemScreen() {
         title="System"
       />
 
-      <Tabs onValueChange={(details) => setTab(details.value)} value={TABS.includes(tab) ? tab : "diagnostics"}>
+      <Tabs
+        onValueChange={(details) => setTab(details.value)}
+        value={TABS.includes(tab) ? tab : "diagnostics"}
+      >
         <TabsList className="mb-6">
           <TabsTrigger value="diagnostics">Diagnostics</TabsTrigger>
           <TabsTrigger value="sync">Sync</TabsTrigger>
@@ -115,7 +118,9 @@ function DiagnosticsPane() {
   const latency = data.latencyBudget;
   const tailscale = data.tailscale;
 
-  const version = useAsync<ConfigVersionStatus>("config-version", (signal) => api.configVersion({ signal }));
+  const version = useAsync<ConfigVersionStatus>("config-version", (signal) =>
+    api.configVersion({ signal }),
+  );
 
   const [durationSecs, setDurationSecs] = React.useState("5");
   const [qps, setQps] = React.useState("50");
@@ -123,9 +128,11 @@ function DiagnosticsPane() {
   const [loadTest, setLoadTest] = React.useState<LoadTestResult | null>(null);
   const [confirmLoadTest, setConfirmLoadTest] = React.useState(false);
   const [drill, setDrill] = React.useState<ResilienceDrill>("upstream-outage");
-  const [drillResult, setDrillResult] = React.useState<ResilienceDrillResult | null>(null);
+  const [drillResult, setDrillResult] =
+    React.useState<ResilienceDrillResult | null>(null);
   const [confirmExitNode, setConfirmExitNode] = React.useState(false);
-  const [confirmTailscaleRollback, setConfirmTailscaleRollback] = React.useState(false);
+  const [confirmTailscaleRollback, setConfirmTailscaleRollback] =
+    React.useState(false);
 
   const latencyColumns: Column<LatencyBudgetCheck>[] = [
     { key: "label", header: "Path", render: (row) => row.label },
@@ -134,13 +141,17 @@ function DiagnosticsPane() {
       header: "Target p50",
       align: "end",
       hideOnStack: true,
-      render: (row) => <span className="tabular">{formatMs(row.target_p50_ms)}</span>,
+      render: (row) => (
+        <span className="tabular">{formatMs(row.target_p50_ms)}</span>
+      ),
     },
     {
       key: "observed",
       header: "Observed mean",
       align: "end",
-      render: (row) => <span className="tabular">{formatMs(row.observed_ms)}</span>,
+      render: (row) => (
+        <span className="tabular">{formatMs(row.observed_ms)}</span>
+      ),
       sortValue: (row) => row.observed_ms,
     },
     {
@@ -148,7 +159,9 @@ function DiagnosticsPane() {
       header: "Samples",
       align: "end",
       hideOnStack: true,
-      render: (row) => <span className="tabular">{formatCount(row.sample_count)}</span>,
+      render: (row) => (
+        <span className="tabular">{formatCount(row.sample_count)}</span>
+      ),
       sortValue: (row) => row.sample_count,
     },
     {
@@ -177,9 +190,11 @@ function DiagnosticsPane() {
               void mutate({
                 key: "runtime-health-check",
                 action: () => api.runtimeHealthCheck(),
-                successTitle: (report) => (report.degraded ? "Runtime degraded" : "Runtime healthy"),
+                successTitle: (report) =>
+                  report.degraded ? "Runtime degraded" : "Runtime healthy",
                 successDetail: (report) =>
-                  report.notes[0] ?? "Runtime guard probes completed without regressions.",
+                  report.notes[0] ??
+                  "Runtime guard probes completed without regressions.",
                 failureTitle: "Health check failed",
               })
             }
@@ -193,56 +208,87 @@ function DiagnosticsPane() {
         description="Counters reported by the DNS runtime, plus an on-demand probe of the configured guard domains."
         title="Runtime health"
       >
-        <StatusIndicator
-          className="mb-4"
-          description={health.notes[0] ?? "No regressions reported by the runtime guard."}
-          label={health.degraded ? "Degraded" : "Healthy"}
-          showIcon
-          tone={health.degraded ? "bad" : "good"}
-        />
+        {/* Guarded: before the first poll resolves, `runtime_health` is the all-zero default, so
+            rendering it unguarded stated "Healthy" in green next to zeroed counters — asserting
+            the resolver was fine when nothing had been measured yet. */}
+        <AsyncRegion
+          empty={null}
+          error={error}
+          isEmpty={false}
+          loading={phase === "loading"}
+          onRetry={reload}
+          skeleton="cards"
+          skeletonRows={4}
+        >
+          <StatusIndicator
+            className="mb-4"
+            description={
+              health.notes[0] ?? "No regressions reported by the runtime guard."
+            }
+            label={health.degraded ? "Degraded" : "Healthy"}
+            showIcon
+            tone={health.degraded ? "bad" : "good"}
+          />
 
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatTile label="Queries" value={formatCount(snapshot.queries_total)} />
-          <StatTile label="Blocked" value={formatCount(snapshot.blocked_total)} />
-          <StatTile
-            label="Upstream failures"
-            tone={snapshot.upstream_failures_total > 0 ? "warn" : "neutral"}
-            toneLabel={snapshot.upstream_failures_total > 0 ? "Seen" : undefined}
-            value={formatCount(snapshot.upstream_failures_total)}
-          />
-          <StatTile label="Fallback served" value={formatCount(snapshot.fallback_served_total)} />
-          <StatTile label="Cache hits" value={formatCount(snapshot.cache_hits_total)} />
-          <StatTile
-            hint="A tracker can hide behind an alias on the site's own domain. Uncloaking follows the alias to the real destination so the filter judges where the request actually goes."
-            label="CNAME uncloaks"
-            value={formatCount(snapshot.cname_uncloaks_total)}
-          />
-          <StatTile
-            hint="Queries blocked only after following that alias. The hostname asked for was on no list; the address it pointed at was."
-            label="CNAME blocks"
-            value={formatCount(snapshot.cname_blocks_total)}
-          />
-          <StatTile
-            delta={`${formatCount(snapshot.classifier_latency_samples)} samples`}
-            label="Classifier latency"
-            value={formatNanosAsMs(snapshot.classifier_latency_avg_ns)}
-          />
-        </div>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatTile
+              label="Queries"
+              value={formatCount(snapshot.queries_total)}
+            />
+            <StatTile
+              label="Blocked"
+              value={formatCount(snapshot.blocked_total)}
+            />
+            <StatTile
+              label="Upstream failures"
+              tone={snapshot.upstream_failures_total > 0 ? "warn" : "neutral"}
+              toneLabel={
+                snapshot.upstream_failures_total > 0 ? "Seen" : undefined
+              }
+              value={formatCount(snapshot.upstream_failures_total)}
+            />
+            <StatTile
+              label="Fallback served"
+              value={formatCount(snapshot.fallback_served_total)}
+            />
+            <StatTile
+              label="Cache hits"
+              value={formatCount(snapshot.cache_hits_total)}
+            />
+            <StatTile
+              hint="A tracker can hide behind an alias on the site's own domain. Uncloaking follows the alias to the real destination so the filter judges where the request actually goes."
+              label="CNAME uncloaks"
+              value={formatCount(snapshot.cname_uncloaks_total)}
+            />
+            <StatTile
+              hint="Queries blocked only after following that alias. The hostname asked for was on no list; the address it pointed at was."
+              label="CNAME blocks"
+              value={formatCount(snapshot.cname_blocks_total)}
+            />
+            <StatTile
+              delta={`${formatCount(snapshot.classifier_latency_samples)} samples`}
+              label="Classifier latency"
+              value={formatNanosAsMs(snapshot.classifier_latency_avg_ns)}
+            />
+          </div>
 
-        {health.notes.length > 0 ? (
-          <ul className="mt-4 space-y-1">
-            {health.notes.map((note) => (
-              <li className="text-muted-foreground text-sm" key={note}>
-                {note}
-              </li>
-            ))}
-          </ul>
-        ) : null}
+          {health.notes.length > 0 ? (
+            <ul className="mt-4 space-y-1">
+              {health.notes.map((note) => (
+                <li className="text-muted-foreground text-sm" key={note}>
+                  {note}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </AsyncRegion>
       </SectionCard>
 
       <SectionCard
         actions={
-          <Badge variant="outline">Cache hit rate {formatPercent(latency.cache_hit_rate, 1)}</Badge>
+          <Badge variant="outline">
+            Cache hit rate {formatPercent(latency.cache_hit_rate, 1)}
+          </Badge>
         }
         description="Targets are hardcoded on the appliance and `observed` is a mean, not a true p50, despite the column name coming from the API."
         title="Latency budget"
@@ -250,7 +296,10 @@ function DiagnosticsPane() {
         {!latency.within_budget ? (
           <NoticeBanner
             className="mb-4"
-            detail={latency.recommendations[0] ?? "At least one path is over its target."}
+            detail={
+              latency.recommendations[0] ??
+              "At least one path is over its target."
+            }
             title="Outside budget"
             tone="warn"
           />
@@ -261,7 +310,8 @@ function DiagnosticsPane() {
           empty={{
             icon: GaugeIcon,
             title: "No latency samples yet",
-            description: "Checks appear once the resolver has answered enough queries to average.",
+            description:
+              "Checks appear once the resolver has answered enough queries to average.",
           }}
           error={error}
           loading={phase === "loading"}
@@ -303,7 +353,12 @@ function DiagnosticsPane() {
             onChange={setDurationSecs}
             value={durationSecs}
           />
-          <TextField inputMode="numeric" label="Queries per second" onChange={setQps} value={qps} />
+          <TextField
+            inputMode="numeric"
+            label="Queries per second"
+            onChange={setQps}
+            value={qps}
+          />
           <TextField
             hint="Steers which domains are picked; the response echoes this value rather than measuring it."
             inputMode="decimal"
@@ -331,14 +386,20 @@ function DiagnosticsPane() {
               label="Average latency"
               value={formatMs(loadTest.avg_latency_ms)}
             />
-            <StatTile label="Throughput" value={`${loadTest.throughput_qps.toFixed(1)} qps`} />
+            <StatTile
+              label="Throughput"
+              value={`${loadTest.throughput_qps.toFixed(1)} qps`}
+            />
           </div>
         ) : null}
 
         {loadTest && loadTest.errors.length > 0 ? (
           <ul className="mt-4 space-y-1">
             {loadTest.errors.map((line) => (
-              <li className="font-mono text-destructive-foreground text-xs" key={line}>
+              <li
+                className="font-mono text-destructive-foreground text-xs"
+                key={line}
+              >
                 {line}
               </li>
             ))}
@@ -423,7 +484,9 @@ function DiagnosticsPane() {
               onClick={() => setConfirmExitNode(true)}
               variant="outline"
             >
-              {tailscale.exit_node_active ? "Stop advertising exit node" : "Advertise as exit node"}
+              {tailscale.exit_node_active
+                ? "Stop advertising exit node"
+                : "Advertise as exit node"}
             </Button>
             <Button
               isLoading={busy === "tailscale-rollback"}
@@ -438,8 +501,14 @@ function DiagnosticsPane() {
       >
         <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryTile label="Host" value={tailscale.hostname ?? "Unknown"} />
-          <SummaryTile label="Tailnet" value={tailscale.tailnet_name ?? "Unknown"} />
-          <SummaryTile label="Peers" value={formatCount(tailscale.peer_count)} />
+          <SummaryTile
+            label="Tailnet"
+            value={tailscale.tailnet_name ?? "Unknown"}
+          />
+          <SummaryTile
+            label="Peers"
+            value={formatCount(tailscale.peer_count)}
+          />
           <SummaryTile label="Version" value={tailscale.version ?? "Unknown"} />
         </dl>
 
@@ -453,7 +522,9 @@ function DiagnosticsPane() {
         ) : null}
 
         {tailscale.last_error ? (
-          <p className="mt-3 text-destructive-foreground text-sm">{tailscale.last_error}</p>
+          <p className="mt-3 text-destructive-foreground text-sm">
+            {tailscale.last_error}
+          </p>
         ) : null}
 
         {tailscale.health_warnings.length > 0 ? (
@@ -469,13 +540,26 @@ function DiagnosticsPane() {
 
       <SectionCard description="Schema and build information." title="Version">
         {version.error && !version.data ? (
-          <ErrorState detail={version.error} onRetry={version.reload} title="Could not read the version" />
+          <ErrorState
+            detail={version.error}
+            onRetry={version.reload}
+            title="Could not read the version"
+          />
         ) : version.data ? (
           <>
             <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              <SummaryTile label="Cogwheel" value={version.data.cogwheel_version} />
-              <SummaryTile label="Schema version" value={formatCount(version.data.schema_version)} />
-              <SummaryTile label="Config version" value={formatCount(version.data.config_version)} />
+              <SummaryTile
+                label="Cogwheel"
+                value={version.data.cogwheel_version}
+              />
+              <SummaryTile
+                label="Schema version"
+                value={formatCount(version.data.schema_version)}
+              />
+              <SummaryTile
+                label="Config version"
+                value={formatCount(version.data.config_version)}
+              />
               <SummaryTile
                 label="Upgrade available"
                 value={version.data.upgrade_available ? "Yes" : "No"}
@@ -523,7 +607,11 @@ function DiagnosticsPane() {
       />
 
       <ConfirmDialog
-        confirmLabel={tailscale.exit_node_active ? "Stop advertising" : "Advertise exit node"}
+        confirmLabel={
+          tailscale.exit_node_active
+            ? "Stop advertising"
+            : "Advertise exit node"
+        }
         consequence="This runs `tailscale up` on the appliance and reconfigures host networking. The previous value is saved so it can be rolled back."
         description={`Exit-node advertising for ${tailscale.hostname ?? "this node"} will be turned ${
           tailscale.exit_node_active ? "off" : "on"
@@ -533,7 +621,9 @@ function DiagnosticsPane() {
           await mutate({
             key: "tailscale-exit-node",
             action: () => api.tailscaleExitNode(!tailscale.exit_node_active),
-            successTitle: tailscale.exit_node_active ? "Exit node disabled" : "Exit node enabled",
+            successTitle: tailscale.exit_node_active
+              ? "Exit node disabled"
+              : "Exit node enabled",
             successDetail: (result) => result.message,
             failureTitle: "Could not change exit-node state",
           });
@@ -615,7 +705,9 @@ function SyncPane() {
     });
     if (!envelope) return;
     // The endpoint returns JSON, so the file is assembled client-side.
-    const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(envelope, null, 2)], {
+      type: "application/json",
+    });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -628,14 +720,24 @@ function SyncPane() {
     {
       key: "key",
       header: "Node key",
-      render: (row) => <span className="font-mono text-xs">{row.node_public_key.slice(0, 16)}…</span>,
+      render: (row) => (
+        <span className="font-mono text-xs">
+          {row.node_public_key.slice(0, 16)}…
+        </span>
+      ),
     },
-    { key: "profile", header: "Profile", render: (row) => <Badge variant="outline">{row.profile}</Badge> },
+    {
+      key: "profile",
+      header: "Profile",
+      render: (row) => <Badge variant="outline">{row.profile}</Badge>,
+    },
     {
       key: "imports",
       header: "Imports",
       align: "end",
-      render: (row) => <span className="tabular">{formatCount(row.imports)}</span>,
+      render: (row) => (
+        <span className="tabular">{formatCount(row.imports)}</span>
+      ),
       sortValue: (row) => row.imports,
     },
     {
@@ -643,7 +745,9 @@ function SyncPane() {
       header: "Revision",
       align: "end",
       hideOnStack: true,
-      render: (row) => <span className="tabular">{formatCount(row.last_revision)}</span>,
+      render: (row) => (
+        <span className="tabular">{formatCount(row.last_revision)}</span>
+      ),
       sortValue: (row) => row.last_revision,
     },
     {
@@ -651,7 +755,9 @@ function SyncPane() {
       header: "Last import",
       align: "end",
       render: (row) => (
-        <span className="text-muted-foreground text-xs">{formatDateTime(row.last_import_at)}</span>
+        <span className="text-muted-foreground text-xs">
+          {formatDateTime(row.last_import_at)}
+        </span>
       ),
       sortValue: (row) => row.last_import_at,
     },
@@ -659,7 +765,10 @@ function SyncPane() {
 
   return (
     <div className="flex flex-col gap-8">
-      <SectionCard description="This node's identity and replication state." title="Node">
+      <SectionCard
+        description="This node's identity and replication state."
+        title="Node"
+      >
         <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryTile label="Profile" value={sync.profile} />
           <SummaryTile label="Revision" value={formatCount(sync.revision)} />
@@ -755,7 +864,11 @@ function SyncPane() {
       <SectionCard
         description="Exports a signed, replayable snapshot of this node's state for another Cogwheel appliance to import. It carries the notification webhook URL in cleartext."
         footer={
-          <Button isLoading={busy === "sync-export"} onClick={() => void exportState()} variant="outline">
+          <Button
+            isLoading={busy === "sync-export"}
+            onClick={() => void exportState()}
+            variant="outline"
+          >
             <ShareIcon aria-hidden />
             Export signed envelope
           </Button>
@@ -763,8 +876,9 @@ function SyncPane() {
         title="Export state"
       >
         <p className="text-muted-foreground text-sm">
-          A read-only follower cannot export. The exported revision is not written back on this build, so
-          repeated exports emit the same revision number.
+          A read-only follower cannot export. The exported revision is not
+          written back on this build, so repeated exports emit the same revision
+          number.
         </p>
       </SectionCard>
 
@@ -790,7 +904,9 @@ function SyncPane() {
           />
           <FormField
             error={
-              envelopeText.trim() && !parsedEnvelope ? "That is not a valid signed sync envelope." : undefined
+              envelopeText.trim() && !parsedEnvelope
+                ? "That is not a valid signed sync envelope."
+                : undefined
             }
             label="Signed envelope JSON"
           >
@@ -813,7 +929,8 @@ function SyncPane() {
           empty={{
             icon: UsersIcon,
             title: "No peers seen",
-            description: "Peers appear after this node imports state from another Cogwheel appliance.",
+            description:
+              "Peers appear after this node imports state from another Cogwheel appliance.",
           }}
           error={error}
           loading={phase === "loading"}
@@ -837,7 +954,8 @@ function SyncPane() {
         onConfirm={async () => {
           await mutate({
             key: "sync-transport-save",
-            action: () => api.updateSyncTransport(transport, token.trim() || undefined),
+            action: () =>
+              api.updateSyncTransport(transport, token.trim() || undefined),
             successTitle: "Sync transport updated",
             successDetail: `Transport mode is now ${transport}.`,
             failureTitle: "Could not update sync transport",
@@ -853,7 +971,9 @@ function SyncPane() {
         confirmLabel="Import and overwrite"
         consequence="Any source or device on this appliance that is absent from the envelope is deleted. There is no undo, and the operation is not transactional."
         description={`State signed by node ${
-          parsedEnvelope ? `${parsedEnvelope.node_public_key.slice(0, 16)}…` : ""
+          parsedEnvelope
+            ? `${parsedEnvelope.node_public_key.slice(0, 16)}…`
+            : ""
         } will replace this node's sources and devices.`}
         destructive
         onConfirm={async () => {
@@ -880,28 +1000,40 @@ function SyncPane() {
 
 function BackupPane() {
   const { busy, mutate } = useCogwheel();
-  const backup = useAsync<BackupData>("backup", (signal) => api.backup({ signal }));
+  const backup = useAsync<BackupData>("backup", (signal) =>
+    api.backup({ signal }),
+  );
   const [restoreText, setRestoreText] = React.useState("");
   const [confirmRestore, setConfirmRestore] = React.useState(false);
 
   const download = () => {
     if (!backup.data) return;
     // The API returns JSON rather than a file, so the download is assembled here.
-    const blob = new Blob([JSON.stringify(backup.data, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(backup.data, null, 2)], {
+      type: "application/json",
+    });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `cogwheel-backup-${new Date().toISOString().slice(0, 10)}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
-    notify.success("Backup downloaded", "The file contains the webhook URL in cleartext — store it safely.");
+    notify.success(
+      "Backup downloaded",
+      "The file contains the webhook URL in cleartext — store it safely.",
+    );
   };
 
   const parsed = React.useMemo<BackupData | null>(() => {
     if (!restoreText.trim()) return null;
     try {
       const value: unknown = JSON.parse(restoreText);
-      if (value && typeof value === "object" && "version" in value && "sources" in value) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "version" in value &&
+        "sources" in value
+      ) {
         return value as BackupData;
       }
       return null;
@@ -936,13 +1068,26 @@ function BackupPane() {
         {backup.loading && !backup.data ? (
           <p className="text-muted-foreground text-sm">Loading…</p>
         ) : backup.error && !backup.data ? (
-          <ErrorState detail={backup.error} onRetry={backup.reload} title="Could not read the backup" />
+          <ErrorState
+            detail={backup.error}
+            onRetry={backup.reload}
+            title="Could not read the backup"
+          />
         ) : backup.data ? (
           <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <SummaryTile label="Format" value={backup.data.version} />
-            <SummaryTile label="Created" value={formatDateTime(backup.data.created_at)} />
-            <SummaryTile label="Sources" value={formatCount(backup.data.sources.length)} />
-            <SummaryTile label="Devices" value={formatCount(backup.data.devices.length)} />
+            <SummaryTile
+              label="Created"
+              value={formatDateTime(backup.data.created_at)}
+            />
+            <SummaryTile
+              label="Sources"
+              value={formatCount(backup.data.sources.length)}
+            />
+            <SummaryTile
+              label="Devices"
+              value={formatCount(backup.data.devices.length)}
+            />
           </dl>
         ) : null}
       </SectionCard>
@@ -968,7 +1113,11 @@ function BackupPane() {
             tone="warn"
           />
           <FormField
-            error={restoreText.trim() && !parsed ? "That is not a valid Cogwheel backup document." : undefined}
+            error={
+              restoreText.trim() && !parsed
+                ? "That is not a valid Cogwheel backup document."
+                : undefined
+            }
             label="Backup JSON"
           >
             <Textarea
@@ -1011,15 +1160,22 @@ function BackupPane() {
 
 /* -------------------------------------------------------------------------- */
 
-function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => void }) {
+function AuditPane({
+  onFilterNotifications,
+}: {
+  onFilterNotifications: () => void;
+}) {
   const { data, busy, mutate } = useCogwheel();
   const [filter, setFilter] = React.useState<AuditFilterId>("all");
   const [expanded, setExpanded] = React.useState<string | null>(null);
   const [confirmRollback, setConfirmRollback] = React.useState(false);
 
-  const events = useAsync<AuditEvent[]>("audit-events", (signal) => api.auditEvents({ signal }));
+  const events = useAsync<AuditEvent[]>("audit-events", (signal) =>
+    api.auditEvents({ signal }),
+  );
   const rows = React.useMemo(
-    () => (events.data ?? []).filter((event) => matchesAuditFilter(event, filter)),
+    () =>
+      (events.data ?? []).filter((event) => matchesAuditFilter(event, filter)),
     [events.data, filter],
   );
 
@@ -1031,8 +1187,10 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
         return mutate({
           key: "runtime-health-check",
           action: () => api.runtimeHealthCheck(),
-          successTitle: (report) => (report.degraded ? "Runtime degraded" : "Runtime healthy"),
-          successDetail: (report) => report.notes[0] ?? "Guard probes completed without regressions.",
+          successTitle: (report) =>
+            report.degraded ? "Runtime degraded" : "Runtime healthy",
+          successDetail: (report) =>
+            report.notes[0] ?? "Guard probes completed without regressions.",
           failureTitle: "Health check failed",
         });
       case "refresh-sources":
@@ -1040,7 +1198,8 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
           key: "refresh-sources",
           action: () => api.refreshSources(),
           successTitle: "Sources refreshed",
-          successDetail: (result) => result.notes[0] ?? `Outcome: ${result.outcome}.`,
+          successDetail: (result) =>
+            result.notes[0] ?? `Outcome: ${result.outcome}.`,
           failureTitle: "Could not refresh sources",
         });
       case "rollback-ruleset":
@@ -1066,8 +1225,12 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
         const summary = summarizeAuditEvent(row);
         return (
           <span>
-            <span className="block font-medium text-foreground text-sm">{summary.title}</span>
-            <span className="block text-muted-foreground text-xs">{summary.detail}</span>
+            <span className="block font-medium text-foreground text-sm">
+              {summary.title}
+            </span>
+            <span className="block text-muted-foreground text-xs">
+              {summary.detail}
+            </span>
           </span>
         );
       },
@@ -1076,20 +1239,30 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
       key: "type",
       header: "Type",
       hideOnStack: true,
-      render: (row) => <span className="font-mono text-muted-foreground text-xs">{row.event_type}</span>,
+      render: (row) => (
+        <span className="font-mono text-muted-foreground text-xs">
+          {row.event_type}
+        </span>
+      ),
       sortValue: (row) => row.event_type,
     },
     {
       key: "category",
       header: "Category",
       hideOnStack: true,
-      render: (row) => <Badge variant="outline">{row.event_type.split(".")[0]}</Badge>,
+      render: (row) => (
+        <Badge variant="outline">{row.event_type.split(".")[0]}</Badge>
+      ),
     },
     {
       key: "when",
       header: "When",
       align: "end",
-      render: (row) => <span className="text-muted-foreground text-xs">{formatRelative(row.created_at)}</span>,
+      render: (row) => (
+        <span className="text-muted-foreground text-xs">
+          {formatRelative(row.created_at)}
+        </span>
+      ),
       sortValue: (row) => row.created_at,
     },
     {
@@ -1122,9 +1295,16 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
       >
         <ul className="grid gap-3 xl:grid-cols-3">
           {actions.map((action) => (
-            <li className="flex flex-col rounded-xl border border-border p-4" key={action.id}>
-              <p className="font-medium text-foreground text-sm">{action.title}</p>
-              <p className="mt-1 flex-1 text-muted-foreground text-sm">{action.detail}</p>
+            <li
+              className="flex flex-col rounded-xl border border-border p-4"
+              key={action.id}
+            >
+              <p className="font-medium text-foreground text-sm">
+                {action.title}
+              </p>
+              <p className="mt-1 flex-1 text-muted-foreground text-sm">
+                {action.detail}
+              </p>
               <details className="mt-2">
                 <summary className="cursor-pointer text-muted-foreground text-xs hover:text-foreground">
                   What this does
@@ -1177,7 +1357,10 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
           columns={columns}
           empty={{
             icon: filter === "all" ? ScrollTextIcon : ActivityIcon,
-            title: filter === "all" ? "No audit events recorded" : "No events match this filter",
+            title:
+              filter === "all"
+                ? "No audit events recorded"
+                : "No events match this filter",
             description:
               filter === "all"
                 ? "Audit entries are written whenever configuration changes or the runtime guard runs."
@@ -1201,7 +1384,9 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
         confirmLabel="Roll back ruleset"
         consequence="The previous ruleset is reactivated and the policy catalog is rebuilt, which re-fetches every enabled source over HTTP."
         description={`The active ruleset ${
-          data.dashboard.active_ruleset ? shortHash(data.dashboard.active_ruleset.hash) : "(none)"
+          data.dashboard.active_ruleset
+            ? shortHash(data.dashboard.active_ruleset.hash)
+            : "(none)"
         } will be replaced by the previously active one.`}
         destructive
         onConfirm={async () => {
@@ -1209,7 +1394,8 @@ function AuditPane({ onFilterNotifications }: { onFilterNotifications: () => voi
             key: "rollback-ruleset",
             action: () => api.rollbackRuleset(),
             successTitle: "Rollback completed",
-            successDetail: (result) => `Restored ruleset ${shortHash(result.hash)}.`,
+            successDetail: (result) =>
+              `Restored ruleset ${shortHash(result.hash)}.`,
             failureTitle: "Could not roll back",
           });
         }}

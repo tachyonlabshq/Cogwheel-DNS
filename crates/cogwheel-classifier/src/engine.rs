@@ -50,6 +50,14 @@ pub struct EngineConfig {
     pub cache_ttl: Duration,
     /// Depth of the scoring queue. Beyond this, submissions are dropped.
     pub queue_depth: usize,
+    /// Ceiling on sustained scoring throughput, in domains per second.
+    ///
+    /// The worker is otherwise a tight `recv` loop, so a burst that fills the queue would let it
+    /// consume a whole core for as long as work is queued — a quarter of a Raspberry Pi 5, taken
+    /// from the resolver it is supposed to be assisting. Scoring is never urgent (the verdict
+    /// applies from the *next* query for a name), so trading latency for a bounded CPU share is
+    /// the right way round.
+    pub max_inferences_per_sec: u32,
 }
 
 impl Default for EngineConfig {
@@ -63,6 +71,10 @@ impl Default for EngineConfig {
             cache_capacity: 16_384,
             cache_ttl: Duration::from_secs(6 * 60 * 60),
             queue_depth: 4_096,
+            // At a measured ~7 us per inference on x86 and a conservative ~35 us on a Cortex-A76,
+            // 2_000/s is roughly 7% of one core on a Pi 5 and far above any household's rate of
+            // *new* domains (only cache misses are ever queued).
+            max_inferences_per_sec: 2_000,
         }
     }
 }
@@ -579,6 +591,45 @@ impl EngineInner {
     }
 }
 
+/// A simple token-bucket pacer for the scoring loop.
+///
+/// Deliberately not a general rate limiter: it only needs to stop one thread from spinning, so it
+/// tracks the earliest time the next inference may start and sleeps the difference. Sleeping is
+/// correct here because the worker owns its thread — nothing else is waiting on it.
+#[derive(Debug)]
+struct RateBudget {
+    min_interval: Option<Duration>,
+    next_allowed: std::cell::Cell<Option<Instant>>,
+}
+
+impl RateBudget {
+    fn new(max_per_sec: u32) -> Self {
+        let min_interval = if max_per_sec == 0 {
+            // Zero means "no ceiling"; the queue depth is then the only bound.
+            None
+        } else {
+            Some(Duration::from_secs_f64(1.0 / f64::from(max_per_sec)))
+        };
+        Self {
+            min_interval,
+            next_allowed: std::cell::Cell::new(None),
+        }
+    }
+
+    fn wait_for_slot(&self) {
+        let Some(min_interval) = self.min_interval else {
+            return;
+        };
+        let now = Instant::now();
+        if let Some(next) = self.next_allowed.get()
+            && now < next
+        {
+            std::thread::sleep(next - now);
+        }
+        self.next_allowed.set(Some(Instant::now() + min_interval));
+    }
+}
+
 /// The background scorer. Run it on a dedicated thread.
 pub struct ScoringWorker {
     inner: Arc<EngineInner>,
@@ -596,7 +647,9 @@ impl ScoringWorker {
     ///
     /// Returns when the channel disconnects, which is the shutdown signal.
     pub fn run(self) {
+        let budget = RateBudget::new(self.inner.config.max_inferences_per_sec);
         while let Ok((host, client)) = self.receiver.recv() {
+            budget.wait_for_slot();
             self.inner.score_and_cache(&host, client.as_deref());
         }
     }
@@ -661,6 +714,7 @@ mod tests {
                 cache_capacity: 64,
                 cache_ttl: Duration::from_secs(60),
                 queue_depth: 8,
+                max_inferences_per_sec: 0,
             },
         )
     }
@@ -770,6 +824,7 @@ mod tests {
                 cache_capacity: 64,
                 cache_ttl: Duration::from_millis(20),
                 queue_depth: 8,
+                max_inferences_per_sec: 0,
             },
         );
         engine.observe("ads.example.com");
@@ -799,6 +854,7 @@ mod tests {
                 cache_capacity: SHARD_COUNT * 4,
                 cache_ttl: Duration::from_millis(30),
                 queue_depth: 64,
+                max_inferences_per_sec: 0,
             },
         );
 
@@ -958,6 +1014,34 @@ mod tests {
         assert_eq!(engine.observe("192.168.1.1"), ObserveOutcome::Unscoreable);
         assert_eq!(engine.observe("localhost"), ObserveOutcome::Unscoreable);
         assert_eq!(engine.lookup("192.168.1.1"), None);
+    }
+
+    #[test]
+    fn rate_budget_paces_the_scoring_loop() {
+        // 200/s means a 5 ms floor between inferences; ten slots must take at least ~45 ms.
+        let budget = RateBudget::new(200);
+        let started = Instant::now();
+        for _ in 0..10 {
+            budget.wait_for_slot();
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "expected pacing to slow ten slots to ~45ms, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn rate_budget_of_zero_means_no_ceiling() {
+        let budget = RateBudget::new(0);
+        let started = Instant::now();
+        for _ in 0..1_000 {
+            budget.wait_for_slot();
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "zero must not pace at all"
+        );
     }
 
     #[test]
