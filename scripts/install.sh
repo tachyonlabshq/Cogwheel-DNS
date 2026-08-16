@@ -64,7 +64,22 @@ STATE_RESOLVED_DROPIN=no
 STATE_RESOLV_ACTION=none
 STATE_RESOLV_PREV_TARGET=
 PREVIOUS_IMAGE=
+PREVIOUS_IMAGE_REF=
 FRESH_INSTALL=yes
+
+# How to tell the operator to run this script again.
+#
+# NOT "$0". The advertised install is `curl -fsSL ... | sudo sh`, and a script
+# read from a pipe has no path: $0 is the shell's own name. Every instruction
+# built from it came out as "sh --uninstall", which is not a command -- it is
+# `sh` being handed an illegal option. Nothing named install.sh exists on the
+# box either, because the installer never copies itself anywhere, so that left
+# the one documented way to restore the host's DNS unreachable from the only
+# place it was mentioned.
+case "$0" in
+    */*) SELF_CMD="sudo $0" ;;
+    *)   SELF_CMD="curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh -s --" ;;
+esac
 # Set when the process holding the DNS port turns out to be Cogwheel itself,
 # so the post-fix "is the port free now?" check does not treat an install that
 # is about to be replaced as an unresolved conflict.
@@ -162,7 +177,8 @@ parse_args() {
 # --------------------------------------------------------------------------
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        die "must run as root (binding port 53 and editing resolver config both need it). Try: sudo $0"
+        die "must run as root (binding port 53 and editing resolver config both need it).
+     Try: $SELF_CMD"
     fi
 }
 
@@ -647,8 +663,44 @@ EOF
 # `rm -f yes`. The prefix keeps the state namespace disjoint from the config
 # namespace, and means sourcing can never clobber a value the operator passed
 # on the command line.
+# Carry forward host changes recorded by an EARLIER run.
+#
+# The state variables reset to "no"/"none" at the top of every invocation, and
+# only resolve_port_conflict sets them. On an upgrade the port conflict was
+# already dealt with by run 1, so run 2 legitimately changes nothing -- and then
+# wrote those defaults straight over the file, erasing the only record that the
+# stub listener had ever been disabled and /etc/resolv.conf rewritten.
+#
+# The damage surfaced much later, at `--uninstall`: load_state_file SUCCEEDS
+# (the file exists, it just says "none"), so the disk-evidence fallback is
+# skipped and revert_host_dns does nothing. The host keeps DNSStubListener=no
+# and Cogwheel's resolv.conf forever, with the operator's real one orphaned in
+# /etc/cogwheel -- while README.md promises uninstall "puts your host DNS back
+# exactly".
+#
+# So this file is a cumulative record, not a snapshot of the current run: a
+# recorded change may be upgraded from absent to present, never the reverse.
+preserve_prior_host_dns_state() {
+    [ -r "$STATE_FILE" ] || return 0
+
+    _prior_dropin=$(sed -n 's/^STATE_RESOLVED_DROPIN=//p' "$STATE_FILE" | tail -n 1)
+    _prior_action=$(sed -n 's/^STATE_RESOLV_ACTION=//p' "$STATE_FILE" | tail -n 1)
+    _prior_target=$(sed -n 's/^STATE_RESOLV_PREV_TARGET=//p' "$STATE_FILE" | tail -n 1)
+
+    if [ "$STATE_RESOLVED_DROPIN" != yes ] && [ "$_prior_dropin" = yes ]; then
+        STATE_RESOLVED_DROPIN=yes
+    fi
+
+    if [ "$STATE_RESOLV_ACTION" = none ] && [ -n "$_prior_action" ] &&
+       [ "$_prior_action" != none ]; then
+        STATE_RESOLV_ACTION=$_prior_action
+        STATE_RESOLV_PREV_TARGET=$_prior_target
+    fi
+}
+
 write_state_file() {
     ensure_config_dir
+    preserve_prior_host_dns_state
     cat > "$STATE_FILE" <<EOF
 # Written by the Cogwheel installer. Consumed by --uninstall.
 # Records only the host changes this installer made, so uninstall reverses
@@ -691,11 +743,24 @@ ensure_volume() {
          docker run --rm -v $VOLUME_NAME:/data --user 0 --entrypoint /bin/sh $IMAGE -c 'chown -R 10001:10001 /data'"
 }
 
+# Record what is running now, so a failed upgrade can be undone.
+#
+# `{{.Image}}`, NOT `{{.Config.Image}}`. Config.Image is the reference string the
+# container was created from -- for the default install that is the literal
+# "ghcr.io/thekozugroup/cogwheel-dns:latest". By the time this runs, `docker
+# pull` has ALREADY repointed that tag at the new image, so rolling back to it
+# re-runs the exact image that just failed: a second 180s health timeout, then
+# "rollback also failed", on a box whose household has no DNS. `{{.Image}}` is
+# the resolved sha256 of the image actually in use, which no pull can move.
+#
+# The tag is still worth capturing, but only to say something legible to the
+# operator -- a bare digest in a status line helps nobody.
 remember_previous() {
     if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
         FRESH_INSTALL=no
-        PREVIOUS_IMAGE=$(docker container inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
-        step "Existing install found (image: ${PREVIOUS_IMAGE:-unknown}) -- upgrading in place"
+        PREVIOUS_IMAGE=$(docker container inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
+        PREVIOUS_IMAGE_REF=$(docker container inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
+        step "Existing install found (image: ${PREVIOUS_IMAGE_REF:-unknown}) -- upgrading in place"
     fi
 }
 
@@ -843,19 +908,48 @@ rollback() {
 
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
-    if [ "$FRESH_INSTALL" = no ] && [ -n "$PREVIOUS_IMAGE" ]; then
-        warn "restoring the previous image: $PREVIOUS_IMAGE"
+    # The previous image is addressed by digest, so this is a genuinely
+    # different image from the one that just failed. Both conditions are
+    # checked rather than assumed: an upgrade between two tags that resolve to
+    # the SAME digest (re-running the installer with nothing new published)
+    # would otherwise "roll back" onto the identical image and fail twice for
+    # no reason, and a digest that has since been pruned from the local store
+    # would fail with "No such image" dressed up as a rollback attempt.
+    if [ "$FRESH_INSTALL" = no ] && [ -n "$PREVIOUS_IMAGE" ] &&
+       [ "$PREVIOUS_IMAGE" != "$IMAGE" ] &&
+       docker image inspect "$PREVIOUS_IMAGE" >/dev/null 2>&1; then
+        warn "restoring the previous image: ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} ($PREVIOUS_IMAGE)"
         _failed_image=$IMAGE
         IMAGE=$PREVIOUS_IMAGE
         if start_container && wait_for_health; then
             IMAGE=$_failed_image
-            err "Rolled back to $PREVIOUS_IMAGE, which is healthy. The new image ($_failed_image) did not start."
+            err "Rolled back to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE}, which is healthy. The new image ($_failed_image) did not start."
             err "Your data volume '$VOLUME_NAME' was not touched."
             exit 1
         fi
         IMAGE=$_failed_image
-        err "Rollback to $PREVIOUS_IMAGE also failed. Container removed."
+        # Say the true thing. This used to claim "Container removed." while
+        # leaving a container behind with --restart unless-stopped, i.e. a
+        # crash loop the operator had just been told did not exist.
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        err "Rollback to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} also failed; the container has been removed."
         err "Your data volume '$VOLUME_NAME' is intact; nothing was deleted."
+        err "This host is NOT serving DNS. Point your router back at its previous"
+        err "resolver, then investigate with:  docker logs $CONTAINER_NAME"
+        exit 1
+    fi
+
+    if [ "$FRESH_INSTALL" = no ]; then
+        # An upgrade with nothing safe to go back to. Do NOT revert the host DNS
+        # changes here: they were made by an EARLIER, successful run, not by
+        # this one, and undoing them would be this script destroying state it
+        # did not create.
+        err "The upgrade failed and there is no previous image to restore."
+        if [ -n "$PREVIOUS_IMAGE" ]; then
+            err "The image this install was running ($PREVIOUS_IMAGE) is no longer in the local store."
+        fi
+        err "Your data volume '$VOLUME_NAME' is intact; nothing was deleted."
+        err "Reinstall a known-good version with:  $SELF_CMD --image <ref>"
         exit 1
     fi
 
@@ -923,10 +1017,12 @@ print_success() {
     printf '  client is covered. On a dual-stack network set the IPv6 address too --\n'
     printf '  a client with an IPv6 resolver will bypass an IPv4-only setting.\n'
     printf '\n'
-    printf '  Verify:      sh scripts/verify-install.sh\n'
+    # Every command here has to work when this script arrived down a pipe, so
+    # none of them may be built from $0 or assume a checkout is present.
+    printf '  Check it:    curl -fsS http://127.0.0.1:%s/health/ready\n' "$HTTP_PORT"
     printf '  Logs:        docker logs -f %s\n' "$CONTAINER_NAME"
     printf '  Upgrade:     re-run this installer\n'
-    printf '  Uninstall:   %s --uninstall\n' "$0"
+    printf '  Uninstall:   %s --uninstall\n' "$SELF_CMD"
     printf '\n'
 }
 
@@ -988,15 +1084,32 @@ do_uninstall() {
         :
     else
         warn "no $STATE_FILE found; removing the container and reverting any Cogwheel resolver drop-in that exists"
-        [ -e "$RESOLVED_DROPIN" ] && STATE_RESOLVED_DROPIN=yes
-        # Fall back to evidence on disk: the backup if it exists, otherwise the
-        # header this installer writes into a resolv.conf it replaced. Either
-        # way revert_host_dns then guarantees a working resolver.
+    fi
+
+    # Disk evidence is consulted whether or not a state file was read, and it
+    # can only ever ADD work. Two reasons it cannot be an `else` branch:
+    #
+    #   - Installers before this fix overwrote the state file on every re-run,
+    #     so boxes exist right now whose state file says "none" while the
+    #     drop-in and the resolv.conf backup are plainly sitting on disk. A
+    #     present-but-stale file used to defeat this recovery entirely.
+    #   - The file can be edited or partially restored by hand.
+    #
+    # Leaving a host on Cogwheel's resolver after it has been uninstalled is the
+    # worst outcome this script has, so the check that prevents it should not be
+    # gated on the record being trustworthy.
+    if [ "$STATE_RESOLVED_DROPIN" != yes ] && [ -e "$RESOLVED_DROPIN" ]; then
+        STATE_RESOLVED_DROPIN=yes
+        step "Found $RESOLVED_DROPIN on disk; it will be removed"
+    fi
+    if [ "$STATE_RESOLV_ACTION" = none ]; then
         if resolv_backup_exists; then
             STATE_RESOLV_ACTION=replaced
+            step "Found $RESOLV_BACKUP on disk; /etc/resolv.conf will be restored from it"
         elif [ -f /etc/resolv.conf ] &&
              grep -q 'Written by the Cogwheel installer' /etc/resolv.conf 2>/dev/null; then
             STATE_RESOLV_ACTION=replaced
+            step "/etc/resolv.conf was written by Cogwheel; it will be replaced"
         fi
     fi
 
