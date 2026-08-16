@@ -191,14 +191,15 @@ jobs:
       # plain grep so only tracked files are searched -- build output under
       # dist/ and target/ is irrelevant and would produce false positives.
       #
-      # Excluded paths:
-      #   docs/architecture/  point-in-time survey documents that legitimately
-      #                       quote the defective values they are reporting on
-      #   this file           it necessarily contains the patterns themselves
+      # There is exactly one exclusion, and it is unavoidable: this file, which
+      # necessarily contains the patterns themselves. docs/ is NOT excluded --
+      # a documentation file that quotes a personal hostname still ships that
+      # hostname in the repository, and an exclusion that exists to let the one
+      # surviving violation through is not a check, it is a green light.
       - name: No personal hostnames, users or LAN addresses
         run: |
           if git grep -nE '(michaelwong|fractal\.local|192\.168\.86\.[0-9]+)' -- \
-               ':!docs/architecture' ':!.github/workflows/ci.yml'; then
+               ':!.github/workflows/ci.yml'; then
             echo "::error::personal hostname, username or LAN address found above"
             exit 1
           fi

@@ -168,8 +168,18 @@ systemd-analyze security cogwheel      # review the hardening
 
 The unit runs as a dedicated non-root user with `ProtectSystem=strict`,
 `NoNewPrivileges=yes`, a capability bounding set of exactly
-`CAP_NET_BIND_SERVICE`, a seccomp filter, and memory/CPU/task limits. The only
-writable path is `/var/lib/cogwheel`, created by `StateDirectory=`.
+`CAP_NET_BIND_SERVICE`, a seccomp filter, and memory/CPU/task limits.
+
+Two paths are writable, and only two:
+
+- `/var/lib/cogwheel` — the data directory, created by `StateDirectory=`.
+- `/usr/local/bin/.cogwheel_tailscale_state.json` — a single file, opened by
+  `ReadWritePaths=`. The server derives this path from the location of its own
+  binary, and it is where `POST /api/v1/tailscale/exit-node` records the state
+  it would roll back to. Without that one exception the endpoint fails with a
+  read-only filesystem error on a node that is otherwise perfectly healthy. The
+  *directory* stays read-only, so nothing the service does can replace a binary
+  in `/usr/local/bin`.
 
 ---
 
@@ -381,6 +391,13 @@ That command:
 - records what it changed in `/etc/cogwheel/install-state` so
   `--uninstall` can reverse exactly those changes.
 
+If it has to replace `/etc/resolv.conf` with a static file rather than
+repointing a symlink, it first copies the original to
+`/etc/cogwheel/resolv.conf.pre-cogwheel`. `--uninstall` restores that copy. If
+the copy is missing — an install from before this was fixed, or someone deleted
+it — uninstall writes a resolv.conf naming the configured upstream servers
+instead. It will not leave the host without a resolver.
+
 `/etc/resolv.conf` is deliberately **not** pointed at Cogwheel itself. If the
 host resolved through Cogwheel and Cogwheel failed to start, the machine would
 have no DNS — and no DNS means you cannot pull an image to fix it.
@@ -517,11 +534,16 @@ There is no configuration file. Everything is environment variables.
 ## 10. Upgrades
 
 **Installer:** re-run it. It is idempotent, keeps the data volume, and rolls
-back to the previous image if the new one fails to become healthy.
+back to the previous image if the new one fails to become healthy. Finding
+Cogwheel already bound to port 53 is expected on a re-run — the running
+container is replaced, not treated as a conflict.
 
 ```sh
 sudo ./scripts/install.sh
 ```
+
+Run the *matching* installer: `install.sh` refuses to drop a container on top
+of a native systemd install and points you at `install-native.sh` instead.
 
 **Compose:** pin a version in `.env` rather than tracking `latest`, so an
 upgrade is a reviewed change.
@@ -619,8 +641,10 @@ sudo ./scripts/install.sh --uninstall --purge    # deletes it too
 
 This removes the container, deletes
 `/etc/systemd/resolved.conf.d/10-cogwheel-stub-listener.conf`, restores
-`/etc/resolv.conf` to what it pointed at before, restarts `systemd-resolved`,
-and removes `/etc/cogwheel`. Only changes recorded in
+`/etc/resolv.conf` to what it pointed at before (from
+`/etc/cogwheel/resolv.conf.pre-cogwheel`, or, if that backup is missing, by
+writing one naming the configured upstream servers), restarts
+`systemd-resolved`, and removes `/etc/cogwheel`. Only changes recorded in
 `/etc/cogwheel/install-state` are reversed — nothing else on the host is
 touched.
 

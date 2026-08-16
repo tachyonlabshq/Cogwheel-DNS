@@ -89,7 +89,7 @@ Read date: 2026-08-16. Source: `/home/user/Cogwheel-DNS/apps/cogwheel-web/**` (e
     - iPhone/iPad: target = primary (first) dns target; instructions "Wi-Fi -> tap the info icon -> Configure DNS -> Manual."
     - Mac: target = primary; "System Settings -> Wi-Fi -> Details -> DNS, then add this resolver."
     - Windows: target = primary; "Network & Internet -> Hardware properties -> DNS server assignment -> Edit."
-    - `primaryDnsTarget` fallback when there are no dns_targets at all: literal string `"fractal.local"`.
+    - `primaryDnsTarget` fallback when there are no dns_targets at all: a hardcoded personal hostname. (Replaced in the rewrite with `window.location.hostname`, which is correct for whoever is reading the page.)
 - **Resolver Summary** card — metric/value table: Protection (badge), Active ruleset (monospace hash prefix or "None"), Cache hits, Fallback served, Runtime notes (count of `runtime_health.notes`).
 - **Recent Risky Events** card — table columns Domain / Device / Client IP / Severity (right-aligned badge). Source: `dashboard.recent_security_events`, **sliced to first 4**. Device column shows `event.device_name ?? "Unassigned device"`. Severity badge variant: destructive if `severity === "high"`, secondary otherwise (note: "critical" also renders as secondary badge — only exact match "high" gets destructive styling; this is a latent styling quirk in the current app worth deciding on purpose during rewrite). Empty state: "No risky DNS events recorded yet."
 - Footer line: while loading, "Loading control plane data..."; otherwise `"{enabledBlocklists.length} enabled blocklists and {settings.devices.length} named devices."` with `" (offline)"` appended when `error` is set.

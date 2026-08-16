@@ -4,7 +4,7 @@ use cogwheel_classifier::{ClassifierEngine, ClassifierSettings, Decision};
 use cogwheel_policy::{
     BlockMode, DecisionKind, PolicyEngine, RuleAction, RulesetArtifact, normalize_domain,
 };
-use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
@@ -266,7 +266,7 @@ impl DnsRuntime {
     ) -> Result<ResponseCode> {
         let request = build_probe_request(domain, record_type)?;
         let response = self.handle_wire_query(&request.to_vec()?, None).await?;
-        Ok(response.response_code())
+        Ok(response.metadata.response_code)
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
@@ -354,7 +354,7 @@ impl DnsRuntime {
         let query_start = Instant::now();
         let request = Message::from_vec(payload)?;
         let query = request
-            .queries()
+            .queries
             .first()
             .cloned()
             .context("dns query missing question")?;
@@ -651,12 +651,14 @@ impl DnsRuntime {
 
     async fn resolve_upstream(&self, request: &Message, domain: &str) -> Result<Message> {
         let query = request
-            .queries()
+            .queries
             .first()
             .context("dns query missing question")?;
         let lookup = self.resolver.lookup(domain, query.query_type()).await?;
         let mut response = build_base_response(request, ResponseCode::NoError);
-        for record in lookup.records() {
+        // A 0.26 `Lookup` carries the upstream message with its sections intact, so the answer
+        // section is addressed directly instead of through the old flattened record list.
+        for record in lookup.answers() {
             response.add_answer(record.clone());
         }
         Ok(response)
@@ -680,7 +682,7 @@ impl DnsRuntime {
                 Err(_) => return Ok(None),
             };
 
-            let Some(target) = lookup.records().iter().find_map(extract_cname_target) else {
+            let Some(target) = lookup.answers().iter().find_map(extract_cname_target) else {
                 return Ok(None);
             };
 
@@ -704,7 +706,7 @@ impl DnsRuntime {
 }
 
 fn extract_cname_target(record: &Record) -> Option<String> {
-    match record.data() {
+    match &record.data {
         RData::CNAME(target) => Some(target.0.to_utf8()),
         _ => None,
     }
@@ -731,17 +733,17 @@ fn domain_matches_override(domain: &str, candidate: &str) -> bool {
 }
 
 fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
-    let mut message = Message::new();
-    message.set_id(0);
-    message.set_message_type(MessageType::Query);
-    message.set_recursion_desired(true);
+    // Probes are synthesised locally and never leave the process, so a fixed id of 0 is safe and
+    // keeps the request byte-for-byte reproducible.
+    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
     message.add_query(Query::query(Name::from_ascii(domain)?, record_type));
     Ok(message)
 }
 
 fn response_for_request(request: &Message, cached: &Message) -> Message {
     let mut response = cached.clone();
-    response.set_id(request.id());
+    response.metadata.id = request.metadata.id;
     response
 }
 
@@ -759,21 +761,26 @@ fn average_atomic_ns(total: &AtomicU64, samples: u64) -> u64 {
 
 fn error_response_for_payload(payload: &[u8]) -> Message {
     match Message::from_vec(payload) {
-        Ok(request) => Message::error_msg(request.id(), request.op_code(), ResponseCode::ServFail),
-        Err(_) => Message::error_msg(0, hickory_proto::op::OpCode::Query, ResponseCode::ServFail),
+        Ok(request) => Message::error_msg(
+            request.metadata.id,
+            request.metadata.op_code,
+            ResponseCode::ServFail,
+        ),
+        Err(_) => Message::error_msg(0, OpCode::Query, ResponseCode::ServFail),
     }
 }
 
 fn build_base_response(request: &Message, code: ResponseCode) -> Message {
-    let mut response = Message::new();
-    response.set_id(request.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(request.op_code());
-    response.set_authoritative(false);
-    response.set_recursion_desired(request.recursion_desired());
-    response.set_recursion_available(true);
-    response.set_response_code(code);
-    for query in request.queries() {
+    let mut response = Message::response(request.metadata.id, request.metadata.op_code);
+    // We are a forwarder, never the zone's authority, and we always accept recursion. The RD bit is
+    // echoed from the request because RFC 1035 requires the response to mirror it.
+    response.metadata.authoritative = false;
+    response.metadata.recursion_desired = request.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
+    // Assigned rather than merged: `merge_response_code` folds in the EDNS high-order bits, which
+    // would change what a blocked answer reports.
+    response.metadata.response_code = code;
+    for query in &request.queries {
         response.add_query(query.clone());
     }
     response
@@ -795,7 +802,7 @@ fn build_blocked_response(request: &Message, mode: BlockMode) -> Message {
 
 fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) -> Message {
     let mut response = build_base_response(request, ResponseCode::NoError);
-    for query in request.queries() {
+    for query in &request.queries {
         let name = query.name().clone();
         match query.query_type() {
             hickory_proto::rr::RecordType::A => {
@@ -820,20 +827,23 @@ mod tests {
     use cogwheel_classifier::{
         Allowlist, ClassifierMode, ClassifierSettings, EngineConfig, ScoringWorker, Sensitivity,
     };
-    use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
-    use hickory_resolver::name_server::TokioConnectionProvider;
+    use hickory_resolver::config::ResolverConfig;
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
     use std::fs;
     use std::sync::Mutex;
 
     /// Build a runtime wired to the shipped classifier model.
     ///
-    /// Constructing the resolver performs no I/O — nothing here touches the network.
+    /// Constructing the resolver performs no I/O — nothing here touches the network. `build` is
+    /// fallible in 0.26 only because it may assemble a TLS client config, which this plaintext
+    /// configuration never asks for.
     fn test_runtime(mode: ClassifierMode) -> (DnsRuntime, ScoringWorker) {
         let resolver = TokioResolver::builder_with_config(
-            ResolverConfig::from_parts(None, vec![], NameServerConfigGroup::new()),
-            TokioConnectionProvider::default(),
+            ResolverConfig::from_parts(None, vec![], vec![]),
+            TokioRuntimeProvider::default(),
         )
-        .build();
+        .build()
+        .expect("resolver builds without I/O");
         let policy = Arc::new(PolicyEngine::new(RulesetArtifact::new(
             Vec::new(),
             HashSet::new(),
@@ -911,28 +921,26 @@ mod tests {
     #[test]
     fn build_probe_request_sets_expected_question() {
         let request = build_probe_request("example.com", RecordType::A).expect("probe request");
-        assert_eq!(request.message_type(), MessageType::Query);
-        assert_eq!(request.queries().len(), 1);
-        assert_eq!(request.queries()[0].query_type(), RecordType::A);
+        assert_eq!(request.metadata.message_type, MessageType::Query);
+        assert_eq!(request.queries.len(), 1);
+        assert_eq!(request.queries[0].query_type(), RecordType::A);
     }
 
     #[test]
     fn cached_response_adopts_request_id() {
-        let mut request = Message::new();
-        request.set_id(42);
-        let mut cached = Message::new();
-        cached.set_id(7);
+        let request = Message::new(42, MessageType::Query, OpCode::Query);
+        let cached = Message::response(7, OpCode::Query);
 
         let response = response_for_request(&request, &cached);
-        assert_eq!(response.id(), 42);
+        assert_eq!(response.metadata.id, 42);
     }
 
     #[test]
     fn error_response_uses_original_request_id() {
         let request = build_probe_request("example.com", RecordType::A).expect("probe request");
         let response = error_response_for_payload(&request.to_vec().expect("wire request"));
-        assert_eq!(response.id(), request.id());
-        assert_eq!(response.response_code(), ResponseCode::ServFail);
+        assert_eq!(response.metadata.id, request.metadata.id);
+        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
     }
 
     /// The classifier scores asynchronously, so client attribution has to survive the trip through

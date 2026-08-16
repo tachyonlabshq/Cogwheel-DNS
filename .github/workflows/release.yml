@@ -37,8 +37,22 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-dev+${GITHUB_SHA::7}"
+            # A container tag may not contain '+', and this string is used
+            # verbatim as an image tag by the manifest job. Semver build
+            # metadata ("0.0.0-dev+abc1234") would make every reference derived
+            # from it an invalid reference format, so use a '.' separator.
+            VERSION="0.0.0-dev.${GITHUB_SHA::7}"
           fi
+
+          # A container tag is [A-Za-z0-9_][A-Za-z0-9._-]{0,127}. Catch a tag
+          # this workflow cannot turn into a valid image reference (v1.0.0+meta,
+          # a tag with a '/', ...) here, in the first job, instead of five jobs
+          # later inside `docker buildx imagetools`.
+          case "$VERSION" in
+            ''|*[!A-Za-z0-9._-]*|[!A-Za-z0-9_]*)
+              echo "::error::tag '${GITHUB_REF_NAME}' yields '${VERSION}', which is not a valid container tag"
+              exit 1 ;;
+          esac
 
           # GHCR rejects uppercase path segments, and this repository name has
           # them. Lowercase it rather than hardcoding the owner.
@@ -54,7 +68,10 @@ jobs:
 
           # Advisory only: a mismatch is worth seeing but should not block a
           # hotfix tag at 02:00.
-          MANIFEST_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          # awk rather than `sed ... | head -1`: under `set -o pipefail` the
+          # early close by head can surface as SIGPIPE and fail this step, and
+          # this job gates every other one.
+          MANIFEST_VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
           if [ "${MANIFEST_VERSION}" != "${VERSION}" ]; then
             echo "::warning::tag version ${VERSION} does not match Cargo.toml workspace version ${MANIFEST_VERSION}"
           fi
@@ -136,10 +153,26 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.meta.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          # build-push-action emits the digest as "sha256:<64 hex>". The
+          # manifest job rebuilds each reference as "<image>@sha256:<filename>",
+          # so the algorithm prefix MUST be stripped here. Leaving it on
+          # produces "<image>@sha256:sha256:<hex>", which buildx rejects with
+          # "invalid reference format" -- and that failure takes the whole
+          # release down, because `publish` needs `manifest`.
+          hex="${DIGEST#sha256:}"
+          case "$hex" in
+            *[!0-9a-f]*|"") echo "::error::unexpected digest format: ${DIGEST}"; exit 1 ;;
+          esac
+          if [ "${#hex}" -ne 64 ]; then
+            echo "::error::digest is not 64 hex characters: ${DIGEST}"
+            exit 1
+          fi
+          touch "/tmp/digests/${hex}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -180,19 +213,50 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ needs.meta.outputs.image_name }}
+          # The semver patterns only match a tag ref. On workflow_dispatch they
+          # produce nothing at all, and `imagetools create` with no -t is an
+          # error -- so a dispatch run gets the dev version computed by `meta`
+          # as its single tag. `Resolve the manifest digest` below looks the
+          # image up by exactly that version, so the two must agree.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=${{ needs.meta.outputs.version }},enable=${{ github.ref_type != 'tag' }}
 
       - name: Create the manifest list
         working-directory: /tmp/digests
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2046
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+          # Every file here is named for the BARE hex digest of one per-arch
+          # image (the image job strips the "sha256:" prefix), so a reference
+          # is "<registry>/<image>@sha256:<64 hex>". Both halves are validated
+          # rather than assumed: an empty tag list or a malformed filename
+          # would otherwise reach buildx as "invalid reference format" -- or,
+          # worse, create a manifest under a tag nobody expects.
+          tags="$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          if [ -z "$tags" ]; then
+            echo "::error::docker/metadata-action produced no tags for ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          refs=""
+          for digest in *; do
+            case "$digest" in
+              *[!0-9a-f]*|"") echo "::error::not a bare digest filename: ${digest}"; exit 1 ;;
+            esac
+            refs="${refs} ${REGISTRY}/${IMAGE_NAME}@sha256:${digest}"
+          done
+          if [ -z "$refs" ]; then
+            echo "::error::no per-architecture digests were downloaded"
+            exit 1
+          fi
+
+          echo "creating: docker buildx imagetools create ${tags}${refs}"
+          # Word splitting is the point: both are pre-built argument lists.
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $refs
         env:
           IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
 
@@ -313,7 +377,16 @@ jobs:
   # ==========================================================================
   publish:
     name: publish release
+    # `manifest` is a deliberate dependency, not an accident: the release notes
+    # below advertise a container tag, and publishing a release that points at
+    # an image that was never pushed is worse than publishing nothing. It is
+    # also why a bug in the manifest job silently costs you the entire release
+    # -- see the digest handling in `image`/`manifest` above.
     needs: [meta, binaries, manifest]
+    # `gh release create` takes GITHUB_REF_NAME as the tag. On workflow_dispatch
+    # that is a branch name, which would create a tag named after the branch.
+    # A dispatch run is a build, not a release.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -24,12 +24,9 @@ use cogwheel_storage::{
 };
 use futures::StreamExt;
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{
-    NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts,
-};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::proto::xfer::Protocol;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
@@ -890,21 +887,30 @@ fn init_tracing() {
 }
 
 fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
-    let mut group = NameServerConfigGroup::new();
+    let mut name_servers = Vec::new();
     for server in servers {
-        let socket_addr = server
+        let socket_addr: SocketAddr = server
             .parse()
             .with_context(|| format!("invalid upstream server: {server}"))?;
-        group.push(NameServerConfig::new(socket_addr, Protocol::Udp));
-        group.push(NameServerConfig::new(socket_addr, Protocol::Tcp));
+        // hickory 0.26 models an upstream as one address carrying a list of connections, rather
+        // than one entry per protocol. The port moved onto the connection, so it has to be copied
+        // across from the configured address or every upstream would silently fall back to 53.
+        let mut udp = ConnectionConfig::udp();
+        udp.port = socket_addr.port();
+        let mut tcp = ConnectionConfig::tcp();
+        tcp.port = socket_addr.port();
+        name_servers.push(NameServerConfig::new(
+            socket_addr.ip(),
+            true,
+            vec![udp, tcp],
+        ));
     }
 
-    let config = ResolverConfig::from_parts(None, vec![], group);
-    Ok(
-        TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
-            .with_options(ResolverOpts::default())
-            .build(),
-    )
+    let config = ResolverConfig::from_parts(None, vec![], name_servers);
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(ResolverOpts::default())
+        .build()
+        .context("build upstream resolver")
 }
 
 fn build_http_app(app_state: ServerState) -> Router {

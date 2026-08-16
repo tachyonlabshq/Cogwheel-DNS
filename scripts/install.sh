@@ -65,6 +65,10 @@ STATE_RESOLV_ACTION=none
 STATE_RESOLV_PREV_TARGET=
 PREVIOUS_IMAGE=
 FRESH_INSTALL=yes
+# Set when the process holding the DNS port turns out to be Cogwheel itself,
+# so the post-fix "is the port free now?" check does not treat an install that
+# is about to be replaced as an unresolved conflict.
+PORT_HELD_BY_COGWHEEL=no
 
 # --------------------------------------------------------------------------
 # Output helpers
@@ -205,6 +209,15 @@ require_docker() {
     step "Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo present)"
 }
 
+# $CONFIG_DIR holds the env file, the install state -- and the backup of
+# /etc/resolv.conf, which is taken during the port-53 fix, i.e. before either
+# of the file writers runs. Every function that writes into the directory calls
+# this first, so no writer depends on another having run earlier.
+ensure_config_dir() {
+    [ -d "$CONFIG_DIR" ] || mkdir -p "$CONFIG_DIR"
+    chmod 0755 "$CONFIG_DIR"
+}
+
 # --------------------------------------------------------------------------
 # Port 53
 #
@@ -312,25 +325,101 @@ repair_resolv_conf() {
     esac
 }
 
-write_static_resolv_conf() {
-    if [ ! -e "$RESOLV_BACKUP" ]; then
-        cp -a /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true
+# True if the backup is there at all. A backup of a symlinked /etc/resolv.conf
+# is itself a symlink, and may legitimately dangle, so `-e` alone would report
+# a perfectly good backup as missing and throw the original away.
+resolv_backup_exists() {
+    [ -e "$RESOLV_BACKUP" ] || [ -L "$RESOLV_BACKUP" ]
+}
+
+# The upstream list is "ip:port"; resolv.conf takes bare addresses. Emitting
+# nothing here would produce a resolv.conf with no nameserver in it, which is
+# indistinguishable from having no DNS at all -- so an unusable list falls back
+# to public resolvers rather than to silence.
+resolv_nameserver_lines() {
+    _lines=
+    _oldifs=$IFS
+    IFS=','
+    # Nothing in this loop is IFS-sensitive; IFS is restored immediately after.
+    for _srv in $UPSTREAM_SERVERS; do
+        [ -n "$_srv" ] || continue
+        _ip=$_srv
+        case "$_ip" in
+            *']:'*) _ip=${_ip%]:*} ;;   # [2606:4700::1111]:53
+            *']'*)  _ip=${_ip%]}   ;;   # [2606:4700::1111]
+            *:*:*)  :              ;;   # bare IPv6, no port to strip
+            *:*)    _ip=${_ip%:*}  ;;   # 1.1.1.1:53
+        esac
+        _ip=${_ip#"["}
+        [ -n "$_ip" ] || continue
+        _lines="${_lines}nameserver ${_ip}
+"
+    done
+    IFS=$_oldifs
+
+    if [ -z "$_lines" ]; then
+        warn "no usable address in upstream list '$UPSTREAM_SERVERS'; falling back to public resolvers so this host keeps working DNS"
+        _lines='nameserver 1.1.1.1
+nameserver 9.9.9.9
+'
     fi
+    printf '%s' "$_lines"
+}
+
+write_static_resolv_conf() {
+    # The backup lives in CONFIG_DIR, and this is reached from
+    # resolve_port_conflict -- which runs BEFORE write_env_file and
+    # write_state_file, the only two functions that used to create that
+    # directory. Without this the cp below failed with ENOENT, no backup was
+    # ever written, and --uninstall had nothing to restore /etc/resolv.conf
+    # from. Create it here rather than relying on a caller that runs later.
+    ensure_config_dir
+
+    if ! resolv_backup_exists; then
+        # -L as well as -e: on a host where systemd-resolved has never run,
+        # /etc/resolv.conf is a symlink to a stub file that does not exist yet.
+        # `-e` is false for a dangling symlink, and that symlink is exactly the
+        # state uninstall has to put back. `cp -a` copies the link itself.
+        if [ ! -e /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+            warn "/etc/resolv.conf does not exist; there is nothing to back up"
+        elif cp -a /etc/resolv.conf "$RESOLV_BACKUP"; then
+            step "Backed up /etc/resolv.conf to $RESOLV_BACKUP"
+        else
+            die "could not back up /etc/resolv.conf to $RESOLV_BACKUP.
+     Refusing to replace this host's resolver configuration without a backup --
+     --uninstall would have nothing to restore and the host could be left with
+     no DNS. Fix the write error above, then re-run."
+        fi
+    fi
+
     {
         printf '# Written by the Cogwheel installer.\n'
         printf '# systemd-resolved stub listener disabled so Cogwheel can bind :53.\n'
         printf '# The host resolves via upstream directly, so host DNS survives a\n'
         printf '# Cogwheel outage. Restored by: install.sh --uninstall\n'
-        # Upstream list is "ip:port"; resolv.conf takes bare addresses.
-        printf '%s\n' "$UPSTREAM_SERVERS" | tr ',' '\n' | while IFS= read -r _srv; do
-            [ -n "$_srv" ] || continue
-            _ip=${_srv%:*}
-            printf 'nameserver %s\n' "$_ip"
-        done
+        resolv_nameserver_lines
     } > /etc/resolv.conf.cogwheel-new
     mv /etc/resolv.conf.cogwheel-new /etc/resolv.conf
     STATE_RESOLV_ACTION=replaced
     step "Wrote a static /etc/resolv.conf (backup at $RESOLV_BACKUP)"
+}
+
+# Last resort for the uninstall/rollback path: leave this host with a
+# resolv.conf that actually resolves. "Uninstalled Cogwheel, lost DNS" is the
+# worst outcome this script can produce, so a missing backup must never mean
+# "do nothing and hope".
+write_fallback_resolv_conf() {
+    {
+        printf '# Written by the Cogwheel installer while removing itself,\n'
+        printf '# because no pre-Cogwheel backup of /etc/resolv.conf was found.\n'
+        printf '# These are the upstream resolvers Cogwheel was configured with.\n'
+        printf '# On a systemd-resolved host you can hand resolution back with:\n'
+        printf '#   sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf\n'
+        printf '#   sudo systemctl restart systemd-resolved\n'
+        resolv_nameserver_lines
+    } > /etc/resolv.conf.cogwheel-new
+    mv /etc/resolv.conf.cogwheel-new /etc/resolv.conf
+    step "Wrote a working /etc/resolv.conf so this host still has DNS"
 }
 
 disable_resolved_stub() {
@@ -414,6 +503,43 @@ resolve_port_conflict() {
         pdns_recursor|pdns_server|coredns|knot-resolver|kresd|stubby)
             die "'$_owner' is already serving DNS on port $DNS_PORT.
      Stop or reconfigure it, then re-run this installer." ;;
+        cogwheel|cogwheel-*)
+            # Cogwheel already holds the port. Two ways that happens, and
+            # neither is an error -- re-running this installer is the
+            # documented upgrade path:
+            #
+            #   - the container is running with --network host, so the socket
+            #     belongs to the containerised process and `ss` names it
+            #     "cogwheel-server" rather than any Docker plumbing;
+            #   - a native (systemd) install is running on this host.
+            #
+            # Without this arm both fall through to the catch-all below, which
+            # refuses to touch "a DNS service it did not install" -- i.e. the
+            # installer aborts because it detected itself.
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; then
+                PORT_HELD_BY_COGWHEEL=yes
+                log "Port $DNS_PORT is held by the existing '$CONTAINER_NAME' container -- it will be replaced"
+            elif command -v systemctl >/dev/null 2>&1 &&
+                 systemctl is-active --quiet cogwheel.service 2>/dev/null; then
+                # install-native.sh runs `install.sh --fix-port-53` on every
+                # upgrade, while its own service is still bound to :53. That is
+                # the same install being upgraded, not a conflict -- the caller
+                # restarts the unit immediately afterwards.
+                if [ "$ACTION" = fix-port-53 ]; then
+                    PORT_HELD_BY_COGWHEEL=yes
+                    log "Port $DNS_PORT is held by the native Cogwheel service -- the caller will restart it"
+                else
+                    die "a native Cogwheel install (systemd unit 'cogwheel') is serving DNS on port $DNS_PORT.
+     Upgrade that install with scripts/install-native.sh, or remove it first:
+         sudo systemctl disable --now cogwheel
+     then re-run this installer."
+                fi
+            else
+                err "Port $DNS_PORT is held by a cogwheel-server process this installer does not manage:"
+                printf '%s\n' "$_listeners" >&2
+                die "Stop it, then re-run this installer."
+            fi
+            ;;
         docker-proxy|dockerd|containerd|"")
             # `ss` could not name the process (or named the Docker plumbing).
             # The stub listener is still identifiable by its address, so check
@@ -441,9 +567,11 @@ resolve_port_conflict() {
 
     # systemd-resolved sometimes needs a second to release the socket, and a
     # stale listener here is worth catching now rather than as a cryptic
-    # container crash loop.
+    # container crash loop. A listener that IS Cogwheel is expected: it is
+    # replaced (container) or restarted by the caller (native upgrade).
     _still=$(port_listeners "$DNS_PORT" || true)
     if [ -n "$_still" ] && [ "$_still" != "unknown" ] &&
+       [ "$PORT_HELD_BY_COGWHEEL" != yes ] &&
        ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"; then
         err "Port $DNS_PORT is still in use after the conflict fix:"
         printf '%s\n' "$_still" >&2
@@ -483,8 +611,7 @@ detect_advertised_targets() {
 # Install
 # --------------------------------------------------------------------------
 write_env_file() {
-    mkdir -p "$CONFIG_DIR"
-    chmod 0755 "$CONFIG_DIR"
+    ensure_config_dir
 
     if [ "$NETWORK_MODE" = host ]; then
         _dns_bind="0.0.0.0:$DNS_PORT"
@@ -521,7 +648,7 @@ EOF
 # namespace, and means sourcing can never clobber a value the operator passed
 # on the command line.
 write_state_file() {
-    mkdir -p "$CONFIG_DIR"
+    ensure_config_dir
     cat > "$STATE_FILE" <<EOF
 # Written by the Cogwheel installer. Consumed by --uninstall.
 # Records only the host changes this installer made, so uninstall reverses
@@ -730,12 +857,22 @@ revert_host_dns() {
             if [ -n "$STATE_RESOLV_PREV_TARGET" ]; then
                 ln -sf "$STATE_RESOLV_PREV_TARGET" /etc/resolv.conf
                 step "Restored /etc/resolv.conf -> $STATE_RESOLV_PREV_TARGET"
+            else
+                warn "install state records a relinked /etc/resolv.conf but not what it pointed at"
+                write_fallback_resolv_conf
             fi ;;
         replaced)
-            if [ -e "$RESOLV_BACKUP" ]; then
+            if resolv_backup_exists; then
                 cp -a "$RESOLV_BACKUP" /etc/resolv.conf
                 rm -f "$RESOLV_BACKUP"
                 step "Restored /etc/resolv.conf from $RESOLV_BACKUP"
+            else
+                # Reachable when the backup was taken by a version of this
+                # installer that could not create it (CONFIG_DIR did not exist
+                # yet), or when it was deleted by hand. Do not leave the host
+                # with a resolv.conf pointing at a resolver we are removing.
+                warn "no backup at $RESOLV_BACKUP; cannot restore the original /etc/resolv.conf"
+                write_fallback_resolv_conf
             fi ;;
         none|*) ;;
     esac
@@ -775,6 +912,9 @@ do_install() {
     require_root
     detect_platform
     require_docker
+    # Before resolve_port_conflict, which is what takes the /etc/resolv.conf
+    # backup that --uninstall depends on.
+    ensure_config_dir
 
     resolve_port_conflict
     detect_advertised_targets
@@ -825,7 +965,15 @@ do_uninstall() {
     else
         warn "no $STATE_FILE found; removing the container and reverting any Cogwheel resolver drop-in that exists"
         [ -e "$RESOLVED_DROPIN" ] && STATE_RESOLVED_DROPIN=yes
-        [ -e "$RESOLV_BACKUP" ] && STATE_RESOLV_ACTION=replaced
+        # Fall back to evidence on disk: the backup if it exists, otherwise the
+        # header this installer writes into a resolv.conf it replaced. Either
+        # way revert_host_dns then guarantees a working resolver.
+        if resolv_backup_exists; then
+            STATE_RESOLV_ACTION=replaced
+        elif [ -f /etc/resolv.conf ] &&
+             grep -q 'Written by the Cogwheel installer' /etc/resolv.conf 2>/dev/null; then
+            STATE_RESOLV_ACTION=replaced
+        fi
     fi
 
     if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
@@ -858,6 +1006,7 @@ do_uninstall() {
 
 do_fix_port_53() {
     require_root
+    ensure_config_dir
     resolve_port_conflict
     # Persist what we changed even in fix-only mode, so uninstall can undo it.
     if [ "$STATE_RESOLVED_DROPIN" = yes ] || [ "$STATE_RESOLV_ACTION" != none ]; then
