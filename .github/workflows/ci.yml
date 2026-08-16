@@ -177,8 +177,117 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: false
+          # Load it into the daemon so the smoke steps below can RUN it. Each
+          # matrix leg runs on its own native architecture, so the arm64 image
+          # is exercised on real arm64 hardware -- the Raspberry Pi target.
+          load: true
+          tags: cogwheel:ci
           cache-from: type=gha,scope=ci-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.arch }}
+
+      # Everything below exists because "the image builds" was the only thing
+      # ever checked, and a build says nothing about whether the container can
+      # start. A documented deployment that died at execve passed CI for weeks.
+      - name: It must refuse to start without NET_BIND_SERVICE
+        run: |
+          set -uo pipefail
+          # The binary carries cap_net_bind_service=+ep, so execve returns EPERM
+          # when the capability is missing from the bounding set -- regardless
+          # of which port it would bind. This asserts the behaviour rather than
+          # the docs' former claim that bridge mode "needs no capability", so
+          # nobody re-adds that advice. If the setcap line is ever dropped, this
+          # step fails and the comments in docker-compose.yml get revisited.
+          docker run --name capcheck -d --cap-drop ALL \
+            -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:5353 \
+            --read-only --tmpfs /tmp:rw,size=64m --init cogwheel:ci >/dev/null 2>&1 || true
+          sleep 5
+          STATUS=$(docker inspect -f '{{.State.Status}}' capcheck 2>/dev/null || echo missing)
+          LOGS=$(docker logs capcheck 2>&1 || true)
+          echo "status=${STATUS}"; echo "${LOGS}"
+          docker rm -f capcheck >/dev/null 2>&1 || true
+          case "$LOGS" in
+            *"Operation not permitted"*)
+              echo "as expected: the image will not exec without the capability"; exit 0 ;;
+          esac
+          if [ "$STATUS" = "running" ]; then
+            echo "::error::the image started without NET_BIND_SERVICE -- the setcap file capability may have been dropped, which would break the non-root :53 bind"
+            exit 1
+          fi
+          echo "::warning::container did not run, but not for the expected capability reason (status=${STATUS})"
+
+      - name: It must actually serve DNS and the web UI
+        run: |
+          set -euo pipefail
+          docker volume create cogwheel-ci >/dev/null
+          # The hardening scripts/install.sh applies, in bridge mode so the
+          # runner's own systemd-resolved on :53 is not in the way.
+          docker run --name cogwheel-ci -d \
+            --cap-drop ALL --cap-add NET_BIND_SERVICE \
+            -p 15353:5353/udp -p 15353:5353/tcp -p 18080:8080/tcp \
+            -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:8080 \
+            -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+            -v cogwheel-ci:/app/data --read-only --tmpfs /tmp:rw,size=64m --init \
+            cogwheel:ci
+
+          # Readiness is the strong signal: 503 until storage, policy AND the
+          # DNS listeners are all up, so it also proves SQLite can be written
+          # on a read-only rootfs.
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:18080/health/ready && break
+            sleep 3
+          done
+          curl -fsS --max-time 3 http://127.0.0.1:18080/health/ready
+
+          test "$(docker exec cogwheel-ci id -u)" = "10001"
+          echo "runs as uid 10001"
+
+          for route in / /activity /devices /classifier /settings; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18080${route}")
+            test "$code" = "200" || { echo "::error::GET ${route} -> ${code}"; exit 1; }
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:18080/api/v1/definitely-not-real)
+          test "$code" = "404" || { echo "::error::unknown API path -> ${code}, expected 404"; exit 1; }
+          echo "web routes and API 404 behaviour correct"
+
+          # A response of any rcode proves the listener and parser work; the
+          # runner's egress to upstream :53 is not this test's concern.
+          python3 - <<'PY'
+          import socket, struct, random, sys
+          tid = random.randint(0, 65535)
+          pkt = struct.pack('>HHHHHH', tid, 0x0100, 1, 0, 0, 0) \
+              + b''.join(bytes([len(l)]) + l.encode() for l in "example.com".split('.')) \
+              + b'\x00' + struct.pack('>HH', 1, 1)
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(15)
+          s.sendto(pkt, ('127.0.0.1', 15353))
+          try:
+              d, _ = s.recvfrom(4096)
+          except Exception as e:
+              print(f"::error::no DNS response from the container: {e}"); sys.exit(1)
+          print(f"DNS answered: rcode={d[3] & 0xF} answers={struct.unpack('>H', d[6:8])[0]}")
+          PY
+
+          # The installer waits on Docker's healthcheck, so it has to pass.
+          for _ in $(seq 1 40); do
+            h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' cogwheel-ci)
+            [ "$h" = "healthy" ] && break
+            sleep 3
+          done
+          test "$h" = "healthy" || { echo "::error::HEALTHCHECK reported '${h}'"; docker logs cogwheel-ci; exit 1; }
+          echo "HEALTHCHECK healthy"
+
+          # SIGTERM must be handled: install.sh runs with --stop-timeout 20.
+          start=$(date +%s)
+          docker stop cogwheel-ci >/dev/null
+          elapsed=$(( $(date +%s) - start ))
+          echo "stopped in ${elapsed}s"
+          test "$elapsed" -lt 20 || { echo "::error::took ${elapsed}s to stop; SIGTERM is not being handled"; exit 1; }
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs cogwheel-ci 2>&1 | tail -50 || true
 
   deploy-assets:
     name: shell + yaml + systemd
