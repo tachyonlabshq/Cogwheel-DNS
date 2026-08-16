@@ -19,16 +19,27 @@ port 53 conflict** that trips up most self-hosted DNS servers, waits until the c
 healthy, and prints two things:
 
 ```
-Cogwheel is running.
+  Cogwheel is running.
 
-  Web interface   http://192.0.2.10:8080
-  DNS address     192.0.2.10        <- put this in your router's DNS setting
+  Web UI        http://192.0.2.10:8080
+  DNS server    192.0.2.10 port 53
+
+  Point the DNS setting on your router at one of:
+      cogwheel
+      192.0.2.10
 ```
 
-Open the web interface, follow the router instructions on the Overview screen, and you are done.
+Open the web UI, follow the router instructions on the Overview screen, and you are done.
 
-Changed your mind? `sudo sh install.sh --uninstall` removes it and puts your host DNS back exactly
-as it was.
+Changed your mind? This removes it and puts your host DNS back exactly as it was:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh -s -- --uninstall
+```
+
+(The installer does not copy itself onto the machine, so there is no local `install.sh` to run —
+fetch it the same way you did to install. From a git checkout, `sudo ./scripts/install.sh
+--uninstall` works too.)
 
 **Requirements:** 64-bit Linux (`x86_64` or `aarch64`), Docker 24+, and root — binding port 53 and
 editing resolver config both need it. On a Raspberry Pi, use the 64-bit OS.
@@ -117,7 +128,7 @@ generates.
 ## Development
 
 ```sh
-cargo test --workspace                     # 145 tests
+cargo test --workspace                     # 212 tests
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd apps/cogwheel-web && npm ci && npm run build
 ```

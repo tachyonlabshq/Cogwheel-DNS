@@ -42,6 +42,11 @@ UNIT_PATH=/etc/systemd/system/cogwheel.service
 
 DNS_PORT="${COGWHEEL_DNS_PORT:-53}"
 HTTP_PORT="${COGWHEEL_HTTP_PORT:-8080}"
+# Whether the port came from the command line, as opposed to the default above.
+# An upgrade adopts the ports recorded in an existing cogwheel.env, but an
+# explicit flag has to win over it -- that is how a port gets changed.
+DNS_PORT_EXPLICIT=no
+HTTP_PORT_EXPLICIT=no
 UPSTREAM_SERVERS="${COGWHEEL_UPSTREAM_SERVERS:-1.1.1.1:53,1.0.0.1:53}"
 PROFILE="${COGWHEEL_PROFILE:-home}"
 
@@ -96,8 +101,8 @@ parse_args() {
         case "$1" in
             --tarball)    TARBALL="${2:?--tarball needs a path}"; shift 2 ;;
             --skip-build) SKIP_BUILD=yes; shift ;;
-            --dns-port)   DNS_PORT="${2:?--dns-port needs a value}"; shift 2 ;;
-            --http-port)  HTTP_PORT="${2:?--http-port needs a value}"; shift 2 ;;
+            --dns-port)   DNS_PORT="${2:?--dns-port needs a value}"; DNS_PORT_EXPLICIT=yes; shift 2 ;;
+            --http-port)  HTTP_PORT="${2:?--http-port needs a value}"; HTTP_PORT_EXPLICIT=yes; shift 2 ;;
             --upstream)   UPSTREAM_SERVERS="${2:?--upstream needs a value}"; shift 2 ;;
             --profile)    PROFILE="${2:?--profile needs a value}"; shift 2 ;;
             --force-env)  FORCE_ENV=yes; shift ;;
@@ -239,6 +244,38 @@ detect_advertised_targets() {
     ADVERTISED_TARGETS=$_targets
 }
 
+# On an upgrade, cogwheel.env -- not this script's defaults -- is what the
+# service actually runs with. write_env_file deliberately preserves that file,
+# and the header tells operators it is safe to edit, so every later step has to
+# agree with its contents rather than with the defaults at the top of this file.
+#
+# Without this, re-running the installer on a box configured for non-default
+# ports went wrong three ways, all silently:
+#
+#   - fix_port_53 saw DNS_PORT=53 and rewrote the host's resolver config to
+#     clear a :53 conflict that does not exist on a machine serving :5353.
+#   - the health probe polled :8080 while the service listened elsewhere, so a
+#     service that had started perfectly was declared failed.
+#   - the closing summary printed ports nothing was listening on.
+#
+# An explicit --dns-port/--http-port still wins; that is how you change a port.
+adopt_ports_from_env_file() {
+    [ -r "$ENV_FILE" ] || return 0
+    [ "$FORCE_ENV" = no ] || return 0
+
+    _env_http=$(sed -n 's/^COGWHEEL_SERVER__HTTP_BIND_ADDR=.*:\([0-9][0-9]*\)$/\1/p' "$ENV_FILE" | tail -n 1)
+    _env_dns=$(sed -n 's/^COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=.*:\([0-9][0-9]*\)$/\1/p' "$ENV_FILE" | tail -n 1)
+
+    if [ "$HTTP_PORT_EXPLICIT" = no ] && [ -n "$_env_http" ] && [ "$_env_http" != "$HTTP_PORT" ]; then
+        step "Using HTTP port $_env_http from $ENV_FILE (not the default $HTTP_PORT)"
+        HTTP_PORT=$_env_http
+    fi
+    if [ "$DNS_PORT_EXPLICIT" = no ] && [ -n "$_env_dns" ] && [ "$_env_dns" != "$DNS_PORT" ]; then
+        step "Using DNS port $_env_dns from $ENV_FILE (not the default $DNS_PORT)"
+        DNS_PORT=$_env_dns
+    fi
+}
+
 write_env_file() {
     mkdir -p "$CONFIG_DIR"
 
@@ -355,6 +392,9 @@ do_install() {
     fi
 
     ensure_service_user
+    # Before fix_port_53, which branches on DNS_PORT, and before the health
+    # probe and summary further down, which both read HTTP_PORT.
+    adopt_ports_from_env_file
     fix_port_53
     install_files
     write_env_file
@@ -365,7 +405,11 @@ do_install() {
     fi
 
     detect_advertised_targets
-    _primary=$(printf '%s' "$ADVERTISED_TARGETS" | cut -d, -f1)
+    # An address, not a name: ADVERTISED_TARGETS leads with the hostname, and a
+    # router's DNS field will not take one. Same reasoning as install.sh.
+    _primary=$(printf '%s' "$ADVERTISED_TARGETS" | tr ',' '\n' |
+        grep -m1 -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f]*:[0-9A-Fa-f:]*$' || true)
+    [ -n "$_primary" ] || _primary=$(printf '%s' "$ADVERTISED_TARGETS" | cut -d, -f1)
 
     printf '\n'
     printf '%s  Cogwheel is running (native install).%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET"

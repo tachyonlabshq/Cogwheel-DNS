@@ -67,8 +67,16 @@ services:
     #   address and preserves client IPs while keeping isolation).
     #
     # To switch to Option B: delete `network_mode: host`, uncomment the `ports`
-    # block, and in .env set the DNS bind addresses to :5353 so no capability
-    # is needed inside the container.
+    # block, and in .env set the DNS bind addresses to :5353.
+    #
+    # KEEP the cap_add below. Binding :5353 does not need the capability, but
+    # the container does not START without it: the binary carries a file
+    # capability with the effective bit set, and execve(2) returns EPERM when a
+    # permitted file capability is not in the process's bounding set. Dropping
+    # it gives "exec /usr/local/bin/cogwheel-server failed: Operation not
+    # permitted" before a line of Cogwheel runs. Measured, not assumed --
+    # cap-drop ALL with no cap-add exits 1 at exec; adding it back reaches
+    # ready and answers queries through the published port.
     # =====================================================================
     network_mode: host
     # ports:
@@ -91,9 +99,15 @@ services:
     # =====================================================================
     # HARDENING
     # =====================================================================
-    # Drop everything, then add back only the one capability needed to bind
-    # :53. The image also carries a file capability on the binary, which is
-    # what actually transfers the privilege to the non-root process.
+    # Drop everything, then add back the one capability the image needs. The
+    # binary carries a file capability (cap_net_bind_service=+ep), which is what
+    # transfers the :53 privilege to the non-root process.
+    #
+    # This is required under BOTH network options, including the bridge setup
+    # that only ever binds :5353. Because the file capability's effective bit is
+    # set, execve(2) fails with EPERM if the capability is missing from the
+    # bounding set -- so removing this does not merely lose the ability to bind
+    # low ports, it stops the container from executing at all.
     cap_drop:
       - ALL
     cap_add:
@@ -104,10 +118,13 @@ services:
     # bind depends on a file capability. In practice it was still granted on
     # Linux 6.18 (CapEff 0x400 with NoNewPrivs 1), but that is not uniform
     # across kernels and the failure mode is "DNS does not come up".
-    #   - Binding :5353 under Option B needs no capability, so enable it there:
+    # This applies to Option B as well: it binds :5353 and never exercises the
+    # capability, but it still has to load a binary that carries one, so
+    # no_new_privs is not automatically safe there either.
+    #   - To enable it under either option, add the line and confirm the
+    #     container reaches `healthy` and `dig @<node> example.com` still
+    #     answers. Verify; do not assume.
     #       security_opt: ["no-new-privileges:true"]
-    #   - To enable it under Option A, add the line and confirm the container
-    #     reaches `healthy` and `dig @<node> example.com` still answers.
 
     # The only path the process writes to is /app/data, which is a volume and
     # therefore still writable. Everything else is immutable at runtime.

@@ -222,9 +222,20 @@ COPY --from=web-builder /build/apps/cogwheel-web/dist /app/web
 # rendering file capabilities non-functional, but on the kernel above the
 # capability was still granted (CapEff 0x400, NoNewPrivs 1). Because that
 # behaviour is not something to bet a household's DNS on across every kernel,
-# docker-compose.yml leaves the flag off by default. The arrangement that needs
-# no capability at all is bridge networking with DNS bound to :5353 and
-# published as 53:5353 — see docker-compose.yml.
+# docker-compose.yml leaves the flag off by default.
+#
+# NET_BIND_SERVICE must be in the bounding set to RUN this image at all, even
+# in an arrangement that only ever binds an unprivileged port. Setting the
+# effective bit above means execve(2) returns EPERM when a permitted file
+# capability is absent from the bounding set, so `--cap-drop ALL` with no
+# matching `--cap-add` fails with:
+#
+#   exec /usr/local/bin/cogwheel-server failed: Operation not permitted
+#
+# before any Cogwheel code runs. Measured on this image: cap-drop ALL alone
+# exits 1 at exec; with --cap-add NET_BIND_SERVICE the same container reaches
+# ready and resolves. There is therefore no "capability-free" way to run this
+# image -- bridge networking avoids NEEDING the privilege, not carrying it.
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/cogwheel-server
 
 # /app/data is created (and owned) in the image so that a fresh Docker named

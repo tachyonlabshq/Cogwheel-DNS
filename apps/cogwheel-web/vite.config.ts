@@ -34,9 +34,20 @@ export default defineConfig({
     // The old app had no proxy, so `npm run dev` 404'd every request unless
     // VITE_COGWHEEL_API_BASE was set. Proxying keeps same-origin semantics in
     // dev identical to production, where the Rust server serves dist/.
+    //
+    // The default is :30080 because that is what the documented development
+    // command binds -- `COGWHEEL_PROFILE=dev cargo run -p cogwheel-server`
+    // listens on 127.0.0.1:30080 (crates/cogwheel-api/src/lib.rs). This used to
+    // point at :8080, the CONTAINER's port, so following DEPLOYMENT.md section
+    // 13 gave a dev server on one port and a proxy aimed at another, and every
+    // API call in `npm run dev` 404'd -- the exact failure the proxy was added
+    // to prevent.
+    //
+    // Override when pointing the dev UI at a real appliance:
+    //   VITE_COGWHEEL_API_TARGET=http://cogwheel.local:8080 npm run dev
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8080",
+        target: process.env.VITE_COGWHEEL_API_TARGET ?? "http://127.0.0.1:30080",
         changeOrigin: true,
       },
     },

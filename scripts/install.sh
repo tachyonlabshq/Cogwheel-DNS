@@ -1001,7 +1001,16 @@ revert_host_dns() {
 }
 
 print_success() {
-    _primary=$(printf '%s' "$ADVERTISED_TARGETS" | cut -d, -f1)
+    # Lead with an ADDRESS, not a name. ADVERTISED_TARGETS begins with the
+    # host's name (detect_advertised_targets appends the IPs after it), so the
+    # headline used to read "DNS server  raspberrypi  port 53" -- and a router's
+    # DNS field takes an address. Following that literally does not work, on the
+    # one line the whole install exists to produce.
+    _primary=$(printf '%s' "$ADVERTISED_TARGETS" | tr ',' '\n' |
+        grep -m1 -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f]*:[0-9A-Fa-f:]*$' || true)
+    # No global address found (an isolated container, or `ip` missing): fall
+    # back to the name rather than printing nothing at all.
+    [ -n "$_primary" ] || _primary=$(printf '%s' "$ADVERTISED_TARGETS" | cut -d, -f1)
 
     printf '\n'
     printf '%s  Cogwheel is running.%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET"
