@@ -321,9 +321,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # The released binary is built by the compiler pinned in
+      # rust-toolchain.toml -- the same one CI tested with -- rather than
+      # whatever `stable` happens to be on release day. Both matrix targets are
+      # listed in that file, so nothing here needs to name a target.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:

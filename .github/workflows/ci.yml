@@ -22,9 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # `rustup show` installs exactly what rust-toolchain.toml names -- the
+      # pinned channel plus its components and targets -- so this job runs the
+      # same compiler, and therefore the same lint set, as a developer's laptop.
+      # Using @stable here instead is what made this workflow fail on eight
+      # consecutive commits: 1.97 added lints nobody could see before pushing.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -69,9 +73,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
+      # aarch64-unknown-linux-gnu is listed in rust-toolchain.toml, so the pin
+      # brings the cross target with it and there is no second place to update.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -215,6 +220,27 @@ jobs:
                   bad = True
           sys.exit(1 if bad else 0)
           PY
+
+      # rust-toolchain.toml governs every cargo invocation, including the ones
+      # inside the Docker build. If the base image were a different version,
+      # rustup would quietly download a second compiler partway through the
+      # image build -- slow, network-dependent, and invisible until it fails.
+      # Two lines in two files, so assert they agree rather than hope.
+      - name: Rust pin matches the Dockerfile base image
+        run: |
+          PINNED="$(awk -F'"' '/^channel = / { print $2; exit }' rust-toolchain.toml)"
+          IMAGE="$(awk -F= '/^ARG RUST_VERSION=/ { print $2; exit }' Dockerfile)"
+          echo "rust-toolchain.toml: ${PINNED}"
+          echo "Dockerfile:          ${IMAGE}"
+          if [ -z "$PINNED" ] || [ -z "$IMAGE" ]; then
+            echo "::error::could not read one of the two Rust version pins"
+            exit 1
+          fi
+          if [ "$PINNED" != "$IMAGE" ]; then
+            echo "::error::Rust pin mismatch: rust-toolchain.toml says ${PINNED}, Dockerfile says ${IMAGE}"
+            exit 1
+          fi
+          echo "agree"
 
       - name: Systemd unit
         run: |

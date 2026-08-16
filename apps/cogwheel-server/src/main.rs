@@ -2735,7 +2735,7 @@ async fn sync_status(
     }
 
     let mut peers: Vec<SyncPeerStatusView> = peers.into_values().collect();
-    peers.sort_by(|a, b| b.last_import_at.cmp(&a.last_import_at));
+    peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_import_at));
 
     Ok(Json(ApiEnvelope {
         data: SyncNodeStatusView {

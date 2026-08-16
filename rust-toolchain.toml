@@ -1,0 +1,30 @@
+# The toolchain is pinned, not floating, and this file is the single source of
+# truth for it. Everything else -- CI, the Dockerfile, a contributor's laptop --
+# is expected to agree with what is written here.
+#
+# Why pin at all: with `stable`, a Rust release adds new Clippy lints and CI
+# turns red on a commit that changed nothing related to them, on a day nobody
+# touched the repository. That happened here -- `manual_checked_ops` and
+# `unnecessary_sort_by` both landed in 1.97 and broke a green tree. Worse, it is
+# undetectable before the push, because the developer's toolchain is whatever
+# they happen to have installed. Pinning makes `cargo clippy` locally and
+# `cargo clippy` in CI the same command with the same lint set, so a red CI now
+# means the code is wrong rather than that the calendar moved.
+#
+# The cost is that toolchain upgrades become a deliberate commit. That is the
+# intent: for an appliance that people flash onto a Pi and leave running, a
+# reproducible build is worth more than being on the newest compiler the week it
+# ships. To upgrade, bump `channel` here, bump `ARG RUST_VERSION` in the
+# Dockerfile to match, and fix whatever the new lints find -- CI verifies the two
+# stay in agreement.
+[toolchain]
+channel = "1.97.0"
+
+# rustfmt and clippy are what CI runs; installing them here means a fresh clone
+# can run the full local check without a second rustup command.
+components = ["rustfmt", "clippy"]
+
+# The reference deployment target. Listing it here is what lets the aarch64 CI
+# job cross-compile without a separate `targets:` declaration that could drift
+# out of step with this file.
+targets = ["aarch64-unknown-linux-gnu"]

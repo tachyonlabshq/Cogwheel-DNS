@@ -777,11 +777,10 @@ fn saturating_ns(elapsed_ns: u128) -> u64 {
 }
 
 fn average_atomic_ns(total: &AtomicU64, samples: u64) -> u64 {
-    if samples == 0 {
-        0
-    } else {
-        total.load(Ordering::Relaxed) / samples
-    }
+    total
+        .load(Ordering::Relaxed)
+        .checked_div(samples)
+        .unwrap_or(0)
 }
 
 fn error_response_for_payload(payload: &[u8]) -> Message {

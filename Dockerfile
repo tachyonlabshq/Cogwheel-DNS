@@ -27,8 +27,14 @@
 # The builder and the runtime share the same Debian suite on purpose: the
 # binary is dynamically linked against glibc, so a bookworm-built binary on a
 # trixie runtime (or vice versa) is a latent, arch-dependent breakage.
+#
+# RUST_VERSION is pinned to the exact patch and MUST equal the `channel` in
+# rust-toolchain.toml -- CI fails the build if they disagree. If the image were
+# older than the pin, rustup would honour the toolchain file and silently
+# download a second compiler mid-build; if it were newer, the release binary
+# would be built by a compiler nothing else in the project ever runs.
 # --------------------------------------------------------------------------
-ARG RUST_VERSION=1.94
+ARG RUST_VERSION=1.97.0
 ARG NODE_VERSION=22.22
 ARG DEBIAN_SUITE=bookworm
 ARG CARGO_CHEF_VERSION=0.1.78
