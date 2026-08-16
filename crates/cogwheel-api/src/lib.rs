@@ -402,18 +402,36 @@ mod tests {
         }
     }
 
+    /// Collect the names of path dependencies declared in a manifest.
+    ///
+    /// Only dependency tables are considered. Scanning every `path =` line in the file would also
+    /// match `[[bin]]`, `[[example]]` and `[[bench]]` targets, which are not couplings between
+    /// crates at all — that false positive is what this section tracking exists to avoid.
     fn path_dependencies(manifest: &str) -> Vec<&str> {
-        let mut dependencies = manifest
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.contains("path =") {
-                    trimmed.split('=').next().map(str::trim)
-                } else {
-                    None
+        let mut dependencies = Vec::new();
+        let mut in_dependency_table = false;
+
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, and the
+                // `[target.'cfg(...)'.dependencies]` forms all end in a dependency table name.
+                let header = trimmed.trim_start_matches('[').trim_end_matches(']');
+                in_dependency_table = header == "dependencies"
+                    || header == "dev-dependencies"
+                    || header == "build-dependencies"
+                    || header.ends_with(".dependencies")
+                    || header.ends_with(".dev-dependencies")
+                    || header.ends_with(".build-dependencies");
+                continue;
+            }
+            if in_dependency_table && trimmed.contains("path =") {
+                if let Some(name) = trimmed.split('=').next() {
+                    dependencies.push(name.trim());
                 }
-            })
-            .collect::<Vec<_>>();
+            }
+        }
+
         dependencies.sort_unstable();
         dependencies
     }

@@ -26,17 +26,20 @@
 //! states it plainly rather than implying the first request was filtered.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::allowlist::Allowlist;
 use crate::model::{Contribution, Model};
-use crate::settings::{ClassifierMode, ClassifierSettings};
+use crate::settings::{ClassifierMode, ClassifierSettings, Sensitivity};
 
 /// Number of independent cache shards. Sized so the four cores of a Pi 5 rarely contend.
 const SHARD_COUNT: usize = 16;
+
+/// How many recent detections to retain for the activity feed.
+const DETECTION_HISTORY: usize = 500;
 
 /// Tuning for the engine's bounded resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,14 +143,77 @@ struct Counters {
     protected_overrides: AtomicU64,
 }
 
+/// A queued scoring request: the hostname plus whichever client asked for it.
+///
+/// The client is carried through the queue because scoring is decoupled from the query that
+/// triggered it — without this the resulting security event would have no attribution.
+type Submission = (String, Option<String>);
+
+/// Invoked by the scoring worker each time a fresh verdict is produced.
+pub type VerdictHook = Arc<dyn Fn(&str, Option<&str>, &Verdict) + Send + Sync>;
+
 struct EngineInner {
     model: Model,
     allowlist: Allowlist,
     config: EngineConfig,
     shards: Vec<Mutex<Shard>>,
     inflight: Mutex<HashSet<String>>,
-    settings: Mutex<ClassifierSettings>,
+    // Mode and sensitivity are read on every DNS query. Holding them in atomics keeps the hot path
+    // lock-free; a `Mutex<ClassifierSettings>` here would serialise every query behind one lock.
+    mode: AtomicU8,
+    sensitivity: AtomicU8,
+    on_verdict: Mutex<Option<VerdictHook>>,
+    detections: Mutex<VecDeque<Detection>>,
     counters: Counters,
+}
+
+/// A recorded classifier detection, kept for the activity feed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Detection {
+    /// Normalised hostname.
+    pub host: String,
+    /// Client that triggered the lookup, if known.
+    pub client: Option<String>,
+    /// Calibrated probability.
+    pub probability: f32,
+    /// Whether the allowlist shielded it.
+    pub protected: bool,
+    /// Whether the active settings would block it.
+    pub blocked: bool,
+    /// When it was scored.
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn mode_to_u8(mode: ClassifierMode) -> u8 {
+    match mode {
+        ClassifierMode::Off => 0,
+        ClassifierMode::Monitor => 1,
+        ClassifierMode::Protect => 2,
+    }
+}
+
+fn mode_from_u8(value: u8) -> ClassifierMode {
+    match value {
+        0 => ClassifierMode::Off,
+        2 => ClassifierMode::Protect,
+        _ => ClassifierMode::Monitor,
+    }
+}
+
+fn sensitivity_to_u8(sensitivity: Sensitivity) -> u8 {
+    match sensitivity {
+        Sensitivity::Low => 0,
+        Sensitivity::Balanced => 1,
+        Sensitivity::High => 2,
+    }
+}
+
+fn sensitivity_from_u8(value: u8) -> Sensitivity {
+    match value {
+        0 => Sensitivity::Low,
+        2 => Sensitivity::High,
+        _ => Sensitivity::Balanced,
+    }
 }
 
 impl std::fmt::Debug for EngineInner {
@@ -172,7 +238,7 @@ fn shard_index(host: &str) -> usize {
 #[derive(Clone, Debug)]
 pub struct ClassifierEngine {
     inner: Arc<EngineInner>,
-    sender: SyncSender<String>,
+    sender: SyncSender<Submission>,
 }
 
 impl ClassifierEngine {
@@ -190,7 +256,10 @@ impl ClassifierEngine {
             config,
             shards: (0..SHARD_COUNT).map(|_| Mutex::new(Shard::new())).collect(),
             inflight: Mutex::new(HashSet::new()),
-            settings: Mutex::new(settings),
+            mode: AtomicU8::new(mode_to_u8(settings.mode)),
+            sensitivity: AtomicU8::new(sensitivity_to_u8(settings.sensitivity)),
+            on_verdict: Mutex::new(None),
+            detections: Mutex::new(VecDeque::new()),
             counters: Counters::default(),
         });
         let engine = Self {
@@ -243,6 +312,11 @@ impl ClassifierEngine {
 
     /// Submit a domain for scoring if it is not already known. Never blocks.
     pub fn observe(&self, host: &str) -> ObserveOutcome {
+        self.observe_with_client(host, None)
+    }
+
+    /// Submit a domain for scoring, attributing it to a client. Never blocks.
+    pub fn observe_with_client(&self, host: &str, client: Option<&str>) -> ObserveOutcome {
         if self.mode() == ClassifierMode::Off {
             return ObserveOutcome::Disabled;
         }
@@ -257,9 +331,12 @@ impl ClassifierEngine {
                 return ObserveOutcome::AlreadyQueued;
             }
         }
-        match self.sender.try_send(host.to_string()) {
+        match self
+            .sender
+            .try_send((host.to_string(), client.map(str::to_string)))
+        {
             Ok(()) => ObserveOutcome::Queued,
-            Err(TrySendError::Full(host)) | Err(TrySendError::Disconnected(host)) => {
+            Err(TrySendError::Full((host, _))) | Err(TrySendError::Disconnected((host, _))) => {
                 if let Ok(mut inflight) = self.inner.inflight.lock() {
                     inflight.remove(&host);
                 }
@@ -312,22 +389,48 @@ impl ClassifierEngine {
 
     /// Currently active settings.
     pub fn settings(&self) -> ClassifierSettings {
-        self.inner
-            .settings
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+        ClassifierSettings {
+            mode: self.mode(),
+            sensitivity: sensitivity_from_u8(self.inner.sensitivity.load(Ordering::Relaxed)),
+        }
     }
 
     /// Replace the active settings.
     pub fn set_settings(&self, settings: ClassifierSettings) {
-        if let Ok(mut guard) = self.inner.settings.lock() {
-            *guard = settings;
+        self.inner
+            .mode
+            .store(mode_to_u8(settings.mode), Ordering::Relaxed);
+        self.inner
+            .sensitivity
+            .store(sensitivity_to_u8(settings.sensitivity), Ordering::Relaxed);
+    }
+
+    /// Register a callback invoked by the worker whenever a fresh verdict is produced.
+    ///
+    /// The server uses this to record security events without polling.
+    pub fn set_verdict_hook(&self, hook: VerdictHook) {
+        if let Ok(mut guard) = self.inner.on_verdict.lock() {
+            *guard = Some(hook);
         }
     }
 
+    /// Most recent detections, newest first, for the activity feed.
+    pub fn recent_detections(&self, limit: usize) -> Vec<Detection> {
+        let Ok(guard) = self.inner.detections.lock() else {
+            return Vec::new();
+        };
+        guard.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// The active calibrated threshold for the current sensitivity.
+    pub fn active_threshold(&self) -> f32 {
+        self.settings()
+            .sensitivity
+            .threshold(self.inner.model.thresholds())
+    }
+
     fn mode(&self) -> ClassifierMode {
-        self.settings().mode
+        mode_from_u8(self.inner.mode.load(Ordering::Relaxed))
     }
 
     /// The loaded model, for reporting provenance and quality.
@@ -357,9 +460,9 @@ impl ClassifierEngine {
 
     /// Drain the queue synchronously. Test-only helper so tests need no worker thread.
     #[cfg(test)]
-    fn drain_for_test(&self, receiver: &Receiver<String>) {
-        while let Ok(host) = receiver.try_recv() {
-            self.inner.score_and_cache(&host);
+    fn drain_for_test(&self, receiver: &Receiver<Submission>) {
+        while let Ok((host, client)) = receiver.try_recv() {
+            self.inner.score_and_cache(&host, client.as_deref());
         }
     }
 }
@@ -374,9 +477,40 @@ impl EngineInner {
         }
     }
 
-    fn score_and_cache(&self, host: &str) {
+    fn score_and_cache(&self, host: &str, client: Option<&str>) {
         let verdict = self.score(host);
         self.counters.scored.fetch_add(1, Ordering::Relaxed);
+
+        // Record anything at or above the most permissive threshold so the activity feed shows what
+        // the classifier is finding even in Monitor mode, where nothing is enforced.
+        let thresholds = self.model.thresholds();
+        if verdict.probability >= thresholds.high {
+            let sensitivity = sensitivity_from_u8(self.sensitivity.load(Ordering::Relaxed));
+            let blocked = mode_from_u8(self.mode.load(Ordering::Relaxed))
+                == ClassifierMode::Protect
+                && !verdict.protected
+                && verdict.probability >= sensitivity.threshold(thresholds);
+            if let Ok(mut detections) = self.detections.lock() {
+                detections.push_back(Detection {
+                    host: host.to_string(),
+                    client: client.map(str::to_string),
+                    probability: verdict.probability,
+                    protected: verdict.protected,
+                    blocked,
+                    observed_at: verdict.scored_at,
+                });
+                while detections.len() > DETECTION_HISTORY {
+                    detections.pop_front();
+                }
+            }
+        }
+
+        if let Ok(guard) = self.on_verdict.lock()
+            && let Some(hook) = guard.as_ref()
+        {
+            hook(host, client, &verdict);
+        }
+
         self.insert(host, verdict);
         if let Ok(mut inflight) = self.inflight.lock() {
             inflight.remove(host);
@@ -407,7 +541,7 @@ impl EngineInner {
 /// The background scorer. Run it on a dedicated thread.
 pub struct ScoringWorker {
     inner: Arc<EngineInner>,
-    receiver: Receiver<String>,
+    receiver: Receiver<Submission>,
 }
 
 impl std::fmt::Debug for ScoringWorker {
@@ -421,8 +555,8 @@ impl ScoringWorker {
     ///
     /// Returns when the channel disconnects, which is the shutdown signal.
     pub fn run(self) {
-        while let Ok(host) = self.receiver.recv() {
-            self.inner.score_and_cache(&host);
+        while let Ok((host, client)) = self.receiver.recv() {
+            self.inner.score_and_cache(&host, client.as_deref());
         }
     }
 
@@ -431,10 +565,10 @@ impl ScoringWorker {
     pub fn run_batch(&self, limit: usize) -> usize {
         let mut processed = 0;
         while processed < limit {
-            let Ok(host) = self.receiver.try_recv() else {
+            let Ok((host, client)) = self.receiver.try_recv() else {
                 break;
             };
-            self.inner.score_and_cache(&host);
+            self.inner.score_and_cache(&host, client.as_deref());
             processed += 1;
         }
         processed

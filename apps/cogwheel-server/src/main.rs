@@ -399,7 +399,10 @@ struct UpdateServiceToggleRequest {
 #[derive(serde::Deserialize)]
 struct UpdateClassifierSettingsRequest {
     mode: cogwheel_classifier::ClassifierMode,
-    threshold: f32,
+    /// Sensitivity replaces the old raw `threshold` field. A user should not have to reason about
+    /// what `0.87` means; the concrete threshold comes from the model's calibration.
+    #[serde(default)]
+    sensitivity: cogwheel_classifier::Sensitivity,
 }
 
 #[derive(serde::Deserialize)]
@@ -601,7 +604,37 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(5))
         .build()
         .context("build notification client")?;
-    let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy, classifier_settings));
+    // Build the classifier engine from the model embedded in the binary, then hand its scoring
+    // worker a dedicated OS thread. The worker is deliberately not a tokio task: scoring is a
+    // CPU-bound loop and putting it on the async runtime would let it compete with the DNS
+    // listeners for executor time on a 4-core Pi.
+    let classifier_model =
+        cogwheel_classifier::embedded_model().context("load embedded classifier model")?;
+    tracing::info!(
+        roc_auc = classifier_model.quality().roc_auc,
+        resident_bytes = classifier_model.resident_bytes(),
+        mode = classifier_settings.mode.as_str(),
+        sensitivity = classifier_settings.sensitivity.as_str(),
+        "classifier model loaded"
+    );
+    let (classifier_engine, scoring_worker) = cogwheel_classifier::ClassifierEngine::new(
+        classifier_model,
+        cogwheel_classifier::Allowlist::builtin(),
+        classifier_settings,
+        cogwheel_classifier::EngineConfig::default(),
+    );
+    let classifier_engine = Arc::new(classifier_engine);
+    std::thread::Builder::new()
+        .name("cogwheel-classifier".to_string())
+        .spawn(move || scoring_worker.run())
+        .context("spawn classifier scoring worker")?;
+
+    let dns_runtime = Arc::new(DnsRuntime::new(
+        resolver,
+        policy,
+        Arc::clone(&classifier_engine),
+    ));
+    dns_runtime.install_classifier_bridge();
     dns_runtime.set_classification_observer(Arc::new({
         let storage = storage.clone();
         let http_client = http_client.clone();
@@ -807,6 +840,13 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
         .route("/api/v1/services/toggles", post(update_service_toggle))
+        .route("/api/v1/classifier", get(classifier_status))
+        .route(
+            "/api/v1/classifier/settings",
+            post(update_classifier_settings),
+        )
+        .route("/api/v1/classifier/inspect", post(inspect_domain))
+        .route("/api/v1/classifier/detections", get(classifier_detections))
         .route(
             "/api/v1/settings/classifier",
             post(update_classifier_settings),
@@ -3549,7 +3589,7 @@ async fn update_classifier_settings(
 ) -> Result<Json<ApiEnvelope<ClassifierSettings>>, axum::http::StatusCode> {
     let settings = ClassifierSettings {
         mode: request.mode,
-        threshold: request.threshold,
+        sensitivity: request.sensitivity,
     };
 
     persist_classifier_settings(&state.storage, &settings)
@@ -5782,14 +5822,14 @@ async fn record_security_event_from_classification(
         return Ok(());
     };
     let device = storage.find_device_by_ip(&client_ip).await?;
-    let severity = severity_for_classifier_score(event.classification.score).to_string();
+    let severity = severity_for_classifier_score(event.score).to_string();
     let security_event = SecurityEventRecord {
         id: Uuid::new_v4(),
         device_id: device.as_ref().map(|record| record.id),
         device_name: device.as_ref().map(|record| record.name.clone()),
         client_ip,
         domain: event.domain,
-        classifier_score: f64::from(event.classification.score),
+        classifier_score: f64::from(event.score),
         severity,
         created_at: event.observed_at,
     };
@@ -5861,6 +5901,217 @@ fn to_ruleset_summary(
         status: status.to_string(),
         created_at,
     }
+}
+
+// ---------------------------------------------------------------- classifier API
+
+/// Per-sensitivity calibration figures, so the UI can show what each option actually costs.
+#[derive(Debug, Clone, serde::Serialize)]
+struct SensitivityBand {
+    low: f32,
+    balanced: f32,
+    high: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierModelInfo {
+    version: u32,
+    trained_at: String,
+    roc_auc: f32,
+    pr_auc: f32,
+    resident_bytes: usize,
+    thresholds: SensitivityBand,
+    false_positive_rate: SensitivityBand,
+    recall: SensitivityBand,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierEngineStats {
+    scored: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    dropped: u64,
+    blocked: u64,
+    protected_overrides: u64,
+    cached_entries: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassifierStatusResponse {
+    settings: ClassifierSettings,
+    model: ClassifierModelInfo,
+    stats: ClassifierEngineStats,
+    active_threshold: f32,
+}
+
+fn build_classifier_status(state: &ServerState) -> ClassifierStatusResponse {
+    let engine = state.dns_runtime.classifier();
+    let model = engine.model();
+    let quality = model.quality();
+    let thresholds = model.thresholds();
+    let stats = engine.stats();
+
+    ClassifierStatusResponse {
+        settings: engine.settings(),
+        model: ClassifierModelInfo {
+            version: cogwheel_classifier::model::FORMAT_VERSION,
+            trained_at: chrono::DateTime::from_timestamp(model.trained_at(), 0)
+                .unwrap_or_default()
+                .to_rfc3339(),
+            roc_auc: quality.roc_auc,
+            pr_auc: quality.pr_auc,
+            resident_bytes: model.resident_bytes(),
+            thresholds: SensitivityBand {
+                low: thresholds.low,
+                balanced: thresholds.balanced,
+                high: thresholds.high,
+            },
+            false_positive_rate: SensitivityBand {
+                low: quality.false_positive_rate[0],
+                balanced: quality.false_positive_rate[1],
+                high: quality.false_positive_rate[2],
+            },
+            recall: SensitivityBand {
+                low: quality.recall_at_threshold[0],
+                balanced: quality.recall_at_threshold[1],
+                high: quality.recall_at_threshold[2],
+            },
+        },
+        stats: ClassifierEngineStats {
+            scored: stats.scored,
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+            dropped: stats.dropped,
+            blocked: stats.blocked,
+            protected_overrides: stats.protected_overrides,
+            cached_entries: stats.cached_entries,
+        },
+        active_threshold: engine.active_threshold(),
+    }
+}
+
+async fn classifier_status(
+    State(state): State<ServerState>,
+) -> Json<ApiEnvelope<ClassifierStatusResponse>> {
+    Json(ApiEnvelope {
+        data: build_classifier_status(&state),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct InspectDomainRequest {
+    domain: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContributionView {
+    label: String,
+    kind: String,
+    value: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectDomainResponse {
+    domain: String,
+    probability: f32,
+    protected: bool,
+    decision: String,
+    active_threshold: f32,
+    blocklist_match: Option<String>,
+    contributions: Vec<ContributionView>,
+}
+
+/// Score an arbitrary domain on demand and explain the result.
+///
+/// This is the one place inference runs synchronously, and it is deliberate: it is an operator
+/// action on the HTTP path, not the DNS path, and a single inference is ~7 microseconds.
+async fn inspect_domain(
+    State(state): State<ServerState>,
+    Json(request): Json<InspectDomainRequest>,
+) -> Result<Json<ApiEnvelope<InspectDomainResponse>>, axum::http::StatusCode> {
+    // Bound the input before doing any work: this endpoint is reachable by anything on the LAN.
+    if request.domain.len() > cogwheel_classifier::normalize::MAX_HOST_LEN {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let domain = cogwheel_classifier::normalize(&request.domain)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let engine = state.dns_runtime.classifier();
+    let verdict = engine.score_now(&domain);
+    let active_threshold = engine.active_threshold();
+    let would_block = !verdict.protected
+        && verdict.probability >= active_threshold
+        && engine.settings().mode == cogwheel_classifier::ClassifierMode::Protect;
+
+    let contributions = engine
+        .explain(&domain, 12)
+        .into_iter()
+        .map(|contribution| ContributionView {
+            label: contribution.label,
+            kind: match contribution.kind {
+                cogwheel_classifier::ContributionKind::Dense => "dense".to_string(),
+                cogwheel_classifier::ContributionKind::Ngram => "ngram".to_string(),
+            },
+            value: contribution.value,
+        })
+        .collect();
+
+    Ok(Json(ApiEnvelope {
+        data: InspectDomainResponse {
+            domain,
+            probability: verdict.probability,
+            protected: verdict.protected,
+            decision: if would_block { "block" } else { "allow" }.to_string(),
+            active_threshold,
+            blocklist_match: None,
+            contributions,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetectionView {
+    domain: String,
+    client: Option<String>,
+    probability: f32,
+    protected: bool,
+    blocked: bool,
+    observed_at: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DetectionsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn classifier_detections(
+    State(state): State<ServerState>,
+    axum::extract::Query(query): axum::extract::Query<DetectionsQuery>,
+) -> Json<ApiEnvelope<Vec<DetectionView>>> {
+    // Clamp rather than reject: an unbounded limit would let one request serialise the whole ring.
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    let detections = state
+        .dns_runtime
+        .classifier()
+        .recent_detections(limit)
+        .into_iter()
+        .map(|detection| DetectionView {
+            domain: detection.host,
+            client: detection.client,
+            probability: detection.probability,
+            protected: detection.protected,
+            blocked: detection.blocked,
+            observed_at: detection.observed_at.to_rfc3339(),
+        })
+        .collect();
+    Json(ApiEnvelope { data: detections })
 }
 
 #[cfg(test)]
@@ -5955,13 +6206,28 @@ mod tests {
     fn classifier_settings_round_trip_json() {
         let settings = ClassifierSettings {
             mode: ClassifierMode::Protect,
-            threshold: 0.77,
+            sensitivity: cogwheel_classifier::Sensitivity::High,
         };
 
         let encoded = serde_json::to_string(&settings).expect("encode settings");
         let decoded: ClassifierSettings = serde_json::from_str(&encoded).expect("decode settings");
         assert_eq!(decoded.mode, ClassifierMode::Protect);
-        assert!((decoded.threshold - 0.77).abs() < f32::EPSILON);
+        assert_eq!(decoded.sensitivity, cogwheel_classifier::Sensitivity::High);
+    }
+
+    /// Settings blobs written by builds that predate the sensitivity field must still load, because
+    /// they are sitting in the `settings` key-value table of every existing install.
+    #[test]
+    fn classifier_settings_tolerate_legacy_blobs() {
+        let decoded: ClassifierSettings =
+            serde_json::from_str(r#"{"mode":"protect","threshold":0.92}"#)
+                .expect("legacy blob must still decode");
+        assert_eq!(decoded.mode, ClassifierMode::Protect);
+        assert_eq!(
+            decoded.sensitivity,
+            cogwheel_classifier::Sensitivity::Balanced,
+            "an unknown legacy field should fall back to the default sensitivity"
+        );
     }
 
     #[test]

@@ -56,7 +56,8 @@ pub mod train;
 
 pub use allowlist::Allowlist;
 pub use engine::{
-    ClassifierEngine, Decision, EngineConfig, EngineStats, ObserveOutcome, ScoringWorker, Verdict,
+    ClassifierEngine, Decision, Detection, EngineConfig, EngineStats, ObserveOutcome,
+    ScoringWorker, Verdict, VerdictHook,
 };
 pub use model::{
     Contribution, ContributionKind, FloatModelParams, Model, ModelError, ModelQuality, Thresholds,
