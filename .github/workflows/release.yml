@@ -54,6 +54,20 @@ jobs:
               exit 1 ;;
           esac
 
+          # Being a legal container tag is not enough -- it must also be semver.
+          # The manifest job derives ":latest" and "{{major}}.{{minor}}" from a
+          # semver PARSE. A tag like "vNext" is a perfectly legal container tag,
+          # so it sails past the check above, gets pushed, repoints :latest at
+          # itself -- and only then do the semver patterns produce nothing and
+          # the run dies, leaving a half-published release and every appliance
+          # on the planet pulling whatever "vNext" happened to be. Reject it
+          # here, in the first job, where nothing has been pushed yet.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] &&
+             ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not semver; expected vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          fi
+
           # GHCR rejects uppercase path segments, and this repository name has
           # them. Lowercase it rather than hardcoding the owner.
           IMAGE_NAME="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
@@ -227,10 +241,17 @@ jobs:
           # error -- so a dispatch run gets the dev version computed by `meta`
           # as its single tag. `Resolve the manifest digest` below looks the
           # image up by exactly that version, so the two must agree.
+          # `latest` is deliberately NOT applied to every tag. scripts/install.sh
+          # defaults to ghcr.io/…:latest and DEPLOYMENT.md's upgrade path is
+          # "re-run the installer", so whatever `latest` points at is what every
+          # appliance installs and upgrades onto. Tagging a prerelease as latest
+          # would silently move every household onto a release candidate.
+          # A semver prerelease always carries a '-' (v0.2.0-rc.1); build
+          # metadata ('+') is already rejected by the meta job.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=${{ needs.meta.outputs.version }},enable=${{ github.ref_type != 'tag' }}
 
       - name: Create the manifest list
@@ -280,6 +301,58 @@ jobs:
         env:
           IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
           VERSION: ${{ needs.meta.outputs.version }}
+
+      # The one check that decides whether the advertised install actually
+      # works. A GHCR package created by a workflow push is PRIVATE by default,
+      # even from a public repository -- publishing does not make it pullable.
+      # A private package means `curl … | sudo sh` on a Raspberry Pi fails at
+      # `docker pull` with "denied", for every user, while the release page
+      # looks perfectly healthy.
+      #
+      # So this is checked the way a user experiences it: an anonymous token,
+      # no credentials, exactly what an unauthenticated Pi gets. It runs BEFORE
+      # `publish` (which needs this job) so a failure means no GitHub Release is
+      # created advertising an image nobody can pull. The images themselves stay
+      # pushed and are reused as-is on re-run, so the fix is: flip visibility,
+      # re-run the failed jobs. Expect this to fire exactly once, on the first
+      # release that ever creates the package.
+      - name: The published image must be pullable without credentials
+        env:
+          IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -uo pipefail
+          TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" \
+                  | jq -r '.token // empty')
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   -H "Authorization: Bearer ${TOKEN:-}" \
+                   -H 'Accept: application/vnd.oci.image.index.v1+json' \
+                   -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+                   "https://ghcr.io/v2/${IMAGE_NAME}/manifests/${VERSION}")
+          if [ "$CODE" = "200" ]; then
+            echo "anonymous pull of ${IMAGE_NAME}:${VERSION} -> HTTP ${CODE} (public, the installer will work)"
+            exit 0
+          fi
+          echo "::error::ghcr.io/${IMAGE_NAME}:${VERSION} is NOT anonymously pullable (HTTP ${CODE}). The one-line installer would fail for every user."
+          {
+            echo "### Release blocked: the container package is private"
+            echo
+            echo "\`ghcr.io/${IMAGE_NAME}:${VERSION}\` returned HTTP \`${CODE}\` to an"
+            echo "unauthenticated pull, which is what a Raspberry Pi running the documented"
+            echo "installer does. \`docker pull\` would fail with \`denied\`."
+            echo
+            echo "This is expected on the FIRST release: GHCR creates packages private."
+            echo
+            echo "**Fix (one time, ~20 seconds):**"
+            echo
+            echo "1. Open <https://github.com/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/package/${IMAGE_NAME##*/}>"
+            echo "   (for a user account: <https://github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/package/${IMAGE_NAME##*/}>)"
+            echo "2. **Package settings** → **Danger Zone** → **Change visibility** → **Public**"
+            echo "3. Re-run the failed jobs on this workflow run."
+            echo
+            echo "The images are already pushed; the re-run reuses them and only publishes the release."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Attest build provenance for the image
         uses: actions/attest-build-provenance@v2

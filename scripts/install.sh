@@ -1038,9 +1038,28 @@ do_install() {
     detect_advertised_targets
 
     step "Pulling $IMAGE"
-    if ! docker pull "$IMAGE"; then
-        die "could not pull $IMAGE.
-     Check network access and that the tag exists for linux/$DOCKER_ARCH."
+    if ! _pull_err=$(docker pull "$IMAGE" 2>&1); then
+        printf '%s\n' "$_pull_err" | sed 's/^/       /' >&2
+        # "denied"/"unauthorized" from a registry that is reachable does not
+        # mean the network is broken, and telling someone to check their network
+        # sends them to the wrong place entirely. For ghcr.io it almost always
+        # means the package is private -- which is a setting on the publisher's
+        # side, not anything this host can fix.
+        case "$_pull_err" in
+            *denied*|*unauthorized*|*authentication*)
+                die "not permitted to pull $IMAGE.
+     The image exists but is not public, so this host cannot download it.
+     If you are the publisher: make the package public in its GitHub package
+     settings. Otherwise log in first:  docker login ghcr.io
+     You can also install without Docker -- see DEPLOYMENT.md section 3." ;;
+            *"not found"*|*"manifest unknown"*)
+                die "$IMAGE does not exist.
+     Check the tag, and that it was published for linux/$DOCKER_ARCH.
+     Releases: https://github.com/thekozugroup/Cogwheel-DNS/releases" ;;
+            *)
+                die "could not pull $IMAGE.
+     Check network access and that the tag exists for linux/$DOCKER_ARCH." ;;
+        esac
     fi
 
     remember_previous
