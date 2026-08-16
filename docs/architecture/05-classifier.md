@@ -18,8 +18,26 @@
 > | Quantisation | per-row scale via a 256-entry log codebook | **one symmetric scale for the n-gram block**; dense weights stay f32 |
 > | Integrity | SHA-256 seal | magic + version + geometry validation, no hash seal |
 > | Category head | 4-way UI labels | **not built** |
-> | On-device adaptation | nightly delta training with FPR-gated promotion | **not built** |
-> | Feedback / adapt / model endpoints | `POST /classifier/feedback`, `POST /classifier/adapt/rollback`, `GET /classifier/model` | **not built** — the shipped surface is `GET /classifier`, `POST /classifier/settings`, `POST /classifier/inspect`, `GET /classifier/detections` |
+> | On-device adaptation | nightly delta training with FPR-gated promotion | **built, but operator-triggered rather than nightly** — see below |
+> | Feedback / adapt / model endpoints | `POST /classifier/feedback`, `POST /classifier/adapt/rollback`, `GET /classifier/model` | feedback, adapt and rollback are **built**; model metadata is served by `GET /classifier` rather than a separate endpoint |
+>
+> ### On-device adaptation, as built
+>
+> Implemented in `crates/cogwheel-classifier/src/adapt.rs`. The base model is immutable;
+> adaptation produces a **sparse additive delta** that is promoted only if it does not regress
+> ROC-AUC or the false-positive rate at any of the three operating points, measured on the
+> committed 25k holdout. Rollback is deleting the delta.
+>
+> Because the model is linear and the hashed feature block is L2-normalised, the worst-case score
+> shift a delta can cause is bounded exactly by Cauchy–Schwarz with no reference to data. That
+> bound is projected to **1.5 logits**, which yields a concrete, tested promise: a host the base
+> scores confidently benign cannot be pushed over even the aggressive threshold, whatever the
+> feedback claims.
+>
+> It differs from this document's proposal in one way: adaptation is **triggered by the operator**,
+> not run nightly on a timer. Unattended retraining on an appliance whose failure mode is "a
+> household's browsing quietly breaks" is a bigger commitment than the guard alone justifies, and
+> the gate is equally effective when a human asks for it.
 >
 > The simpler linear model was chosen after measurement: it reaches ROC-AUC 0.891 held out, its
 > per-feature contribution is *exactly* `w·x` (so explanations are arithmetic rather than

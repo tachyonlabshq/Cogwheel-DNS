@@ -84,6 +84,20 @@ Three things make it safe to run on an appliance:
 
 It starts in **Monitor** mode: it scores and reports, and blocks nothing until you say so.
 
+### Correcting it
+
+If it gets one wrong, say so in the UI. Cogwheel stores your reports and, when you ask it to,
+trains a small correction from them — on the device, with nothing leaving your network.
+
+The correction is only kept if it passes a check first. Cogwheel re-measures the corrected model
+against 25,000 held-out domains and **refuses to apply it** if accuracy drops or false positives
+rise at any sensitivity. A rejection is a good outcome, and the UI says which check failed. The
+shipped model is never modified, so reverting is one click.
+
+There is also a hard limit on how far a correction can move any score, derived from the model's
+own structure rather than from testing. A domain the model is confident about cannot be flipped by
+feedback — verified against real domains including `chase.com`, `apple.com` and `letsencrypt.org`.
+
 Scoring is asynchronous, so the first query for a brand-new domain resolves before a verdict
 exists; enforcement begins on the next one. The UI says so plainly.
 

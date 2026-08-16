@@ -501,6 +501,66 @@ export type ClassifierSensitivity = "low" | "balanced" | "high";
 
 export type SensitivityTriple = Record<ClassifierSensitivity, number>;
 
+/**
+ * What on-device adaptation is doing right now, and on what evidence.
+ *
+ * The shipped model is never rewritten. A "delta" is a bounded additive correction
+ * stored beside it, so `active: false` means scoring is bit-identical to the model
+ * as it left the factory. The measurements are only reported while the delta they
+ * were measured on is the one actually scoring traffic.
+ */
+export type ClassifierAdaptation = {
+  active: boolean;
+  /** RFC3339, or null when no correction is active. */
+  trainedAt: string | null;
+  /** Feedback items the active correction was trained on. */
+  exampleCount: number;
+  /** Hashed character-run entries the correction carries. */
+  ngramEntries: number;
+  /** ROC-AUC of base+correction on the committed holdout; null when nothing is active. */
+  rocAuc: number | null;
+  falsePositiveRate: SensitivityTriple | null;
+  /** Certified worst-case effect of the correction on any score, in logits. */
+  maxLogitShift: number;
+  /** The ceiling `maxLogitShift` is held under. */
+  logitBudget: number;
+  /** Reports stored but not yet turned into a correction. */
+  pendingFeedback: number;
+  /** Reports required before adaptation can be judged at all. */
+  minimumFeedback: number;
+};
+
+export type ClassifierFeedbackResult = {
+  /** The normalised host the appliance stored. */
+  domain: string;
+  isAd: boolean;
+  pendingFeedback: number;
+  minimumFeedback: number;
+};
+
+/**
+ * The result of training a correction and putting it in front of the promotion gate.
+ *
+ * `rejected` is a healthy outcome, not a failure: the gate measured the correction
+ * against the committed holdout and refused to install something that scored worse.
+ * Nothing changes on the appliance in that case.
+ */
+export type AdaptationOutcome = {
+  status: "promoted" | "rejected" | "notEnoughData";
+  promoted: boolean;
+  /** Set only on rejection; names the exact criterion that failed. Render verbatim. */
+  reason: string | null;
+  rocAuc: number | null;
+  falsePositiveRate: SensitivityTriple | null;
+  /** Set only on promotion. */
+  exampleCount: number | null;
+  /** Both set only when there was too little feedback to judge. */
+  have: number | null;
+  need: number | null;
+  /** The adaptation state the caller is now in, after the outcome was applied. */
+  adaptation: ClassifierAdaptation;
+};
+
 export type ClassifierStatus = {
   settings: { mode: ClassifierMode; sensitivity: ClassifierSensitivity };
   model: {
@@ -521,9 +581,11 @@ export type ClassifierStatus = {
     dropped: number;
     blocked: number;
     protectedOverrides: number;
+    hookPanics: number;
     cachedEntries: number;
   };
   activeThreshold: number;
+  adaptation: ClassifierAdaptation;
 };
 
 export type InspectionContribution = {
@@ -642,6 +704,16 @@ export const api = {
     fetchJson<Inspection>("/api/v1/classifier/inspect", post({ domain }), options),
   classifierDetections: (limit = 50, options?: RequestOptions) =>
     fetchJson<ClassifierDetection[]>(`/api/v1/classifier/detections?limit=${limit}`, {}, options),
+
+  /* --- Classifier adaptation ---------------------------------------------- */
+  /** Stores one correction. Nothing is trained and no score moves until `adaptClassifier`. */
+  classifierFeedback: (domain: string, isAd: boolean) =>
+    fetchJson<ClassifierFeedbackResult>("/api/v1/classifier/feedback", post({ domain, isAd })),
+  /** Trains a correction from stored feedback and installs it only if it clears the gate. */
+  adaptClassifier: () => fetchJson<AdaptationOutcome>("/api/v1/classifier/adapt", post()),
+  /** Discards the active correction. The base model was never modified, so this is all rollback is. */
+  rollbackClassifierAdaptation: () =>
+    fetchJson<ClassifierAdaptation>("/api/v1/classifier/adapt/rollback", post()),
 
   /* --- Runtime ----------------------------------------------------------- */
   pauseRuntime: (minutes: number) => fetchVoid("/api/v1/runtime/pause", post({ minutes })),

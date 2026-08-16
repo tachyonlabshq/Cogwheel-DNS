@@ -1,10 +1,12 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
-import { SearchIcon, ShieldCheckIcon } from "lucide-react";
-import { api, errorMessage, type Inspection } from "@/lib/api";
+import { BanIcon, CircleCheckIcon, SearchIcon, ShieldCheckIcon } from "lucide-react";
+import { api, errorMessage, type ClassifierFeedbackResult, type Inspection } from "@/lib/api";
 import { formatPercent, formatProbability } from "@/lib/format";
 import { looksLikeDomain } from "@/lib/derive";
+import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogContent, DialogHeader } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -215,6 +217,8 @@ function InspectionReport({ result }: { result: Inspection }) {
         </p>
       </div>
 
+      <FeedbackActions domain={result.domain} />
+
       {result.contributions.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           The model returned no per-feature contributions for this domain.
@@ -252,6 +256,78 @@ function InspectionReport({ result }: { result: Inspection }) {
       )}
     </div>
   );
+}
+
+/**
+ * Turns "that verdict is wrong" into a stored report.
+ *
+ * The copy here carries the whole safety model in miniature, because this is the
+ * one place a household interacts with adaptation without reading the Classifier
+ * screen. Pressing a button stores a claim and changes nothing else: no score
+ * moves until adaptation is run deliberately and clears its gate. Saying anything
+ * warmer than that — "thanks, we've learned!" — would be a lie the appliance
+ * would then have to live down the next time the same domain is blocked.
+ */
+function FeedbackActions({ domain }: { domain: string }) {
+  const { refresh } = useCogwheel();
+  const [pending, setPending] = React.useState<"ad" | "not-ad" | null>(null);
+
+  const report = async (isAd: boolean) => {
+    setPending(isAd ? "ad" : "not-ad");
+    try {
+      const result = await api.classifierFeedback(domain, isAd);
+      notify.success(
+        isAd ? `Reported ${result.domain} as an ad domain` : `Reported ${result.domain} as not an ad`,
+        `Stored, not applied — scoring for this domain is unchanged. ${nextStep(result)}`,
+      );
+      // Keeps the pending-report count on the Classifier screen honest without
+      // waiting for the next poll.
+      await refresh();
+    } catch (cause) {
+      notify.error("Could not record that report", errorMessage(cause));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <p className="font-medium text-foreground text-sm">Is this verdict wrong?</p>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Your report is stored on this appliance. It affects scoring only after you run adaptation on
+        the Classifier screen and the correction passes its safety check.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button
+          disabled={pending !== null}
+          isLoading={pending === "not-ad"}
+          onClick={() => void report(false)}
+          size="sm"
+          variant="outline"
+        >
+          <CircleCheckIcon aria-hidden />
+          This is not an ad
+        </Button>
+        <Button
+          disabled={pending !== null}
+          isLoading={pending === "ad"}
+          onClick={() => void report(true)}
+          size="sm"
+          variant="outline"
+        >
+          <BanIcon aria-hidden />
+          This should be blocked
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** What happens next, stated in counts rather than in reassurance. */
+function nextStep(result: ClassifierFeedbackResult): string {
+  return result.pendingFeedback >= result.minimumFeedback
+    ? `${result.pendingFeedback} reports are now stored, enough to run adaptation on the Classifier screen.`
+    : `${result.pendingFeedback} of ${result.minimumFeedback} reports stored; adaptation needs ${result.minimumFeedback} before it can judge a correction.`;
 }
 
 /**
