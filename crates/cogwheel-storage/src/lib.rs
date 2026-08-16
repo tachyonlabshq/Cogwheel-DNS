@@ -719,3 +719,57 @@ fn parse_datetime(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
 fn to_sqlite_error(error: chrono::ParseError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Migrations run on every boot, so they must be safe to apply repeatedly.
+    ///
+    /// Regression guard for a real outage: migration 0010 ended with a plain
+    /// `INSERT INTO config_migrations`, whose `version` column is UNIQUE. That failure was
+    /// invisible while migration results were discarded, but once they became fatal it meant the
+    /// server refused to start against ANY pre-existing database — every install would have been
+    /// bricked by the upgrade that was meant to make failures visible.
+    #[test]
+    fn migrations_are_idempotent_across_restarts() {
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+
+        apply_migrations(&connection).expect("first boot should migrate cleanly");
+        apply_migrations(&connection).expect("second boot must not fail on an existing database");
+        apply_migrations(&connection).expect("third boot must still succeed");
+
+        // The seeded row must exist exactly once, not be duplicated by the re-runs.
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM config_migrations WHERE version = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query seeded migration row");
+        assert_eq!(
+            count, 1,
+            "re-running migrations must not duplicate seeded rows"
+        );
+    }
+
+    /// A genuine SQL failure must stop startup rather than leaving the server running against a
+    /// schema that is missing tables or columns.
+    #[test]
+    fn a_real_migration_error_is_not_mistaken_for_already_applied() {
+        let duplicate_column = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("duplicate column name: foo".to_string()),
+        );
+        assert!(is_already_applied(&duplicate_column));
+
+        let disk_full = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(13),
+            Some("database or disk is full".to_string()),
+        );
+        assert!(
+            !is_already_applied(&disk_full),
+            "a real failure must not be treated as an already-applied migration"
+        );
+    }
+}

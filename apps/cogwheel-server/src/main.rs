@@ -961,7 +961,13 @@ fn build_http_app(app_state: ServerState) -> Router {
                 // shell with 200, which hides broken deploys from caches and monitoring alike.
                 let is_spa_route = {
                     let path = request.uri().path();
-                    !path.starts_with("/assets/")
+                    // An unmatched API path is a genuine 404, not a client-side route. Without this
+                    // exclusion a typo'd or removed endpoint answered 200 with the HTML shell,
+                    // which turns a broken integration into a silent one.
+                    !path.starts_with("/api/")
+                        && !path.starts_with("/health/")
+                        && !path.starts_with("/metrics")
+                        && !path.starts_with("/assets/")
                         && !path
                             .rsplit('/')
                             .next()

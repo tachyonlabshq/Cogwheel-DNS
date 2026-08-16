@@ -21,4 +21,7 @@ CREATE TABLE IF NOT EXISTS config_migrations (
 );
 
 -- Record initial state
-INSERT INTO config_migrations (version, description) VALUES (1, 'Initial config schema version');
+-- OR IGNORE: migrations are re-run on every boot, and `version` is UNIQUE, so a plain INSERT
+-- failed on the second start of any existing install. That failure used to be swallowed; now that
+-- migration errors are fatal, it would refuse to start.
+INSERT OR IGNORE INTO config_migrations (version, description) VALUES (1, 'Initial config schema version');
