@@ -520,13 +520,81 @@ struct ImportSyncEnvelopeRequest {
     envelope: SyncEnvelope,
 }
 
+const USAGE: &str = "\
+cogwheel-server -- the Cogwheel DNS appliance
+
+Usage:
+  cogwheel-server            run the server
+  cogwheel-server --version  print the version and exit
+  cogwheel-server --help     print this message and exit
+
+There are no other flags. Everything is configured by environment variable:
+COGWHEEL_PROFILE, COGWHEEL_SERVER__*, COGWHEEL_STORAGE__*, COGWHEEL_UPSTREAM__*.
+On an installed appliance those live in /etc/cogwheel/cogwheel.env. See
+DEPLOYMENT.md for the full list.
+";
+
+#[derive(Debug, PartialEq, Eq)]
+enum CliAction {
+    /// Start the server.
+    Run,
+    /// Write this to stdout and exit 0.
+    Print(String),
+    /// Write this to stderr and exit 2.
+    Fail(String),
+}
+
+/// Decide what to do with the command line before any side effects happen.
+///
+/// The important property is that an argument this binary does not understand
+/// is a hard error rather than something it ignores. Previously every argument
+/// except the literal `healthcheck` fell straight through and started the
+/// server, so `cogwheel-server --version` on an appliance printed nothing and
+/// quietly bound a SECOND resolver to :53 -- next to the one the service was
+/// already running. For a process whose entire job is to take over the host's
+/// DNS, refusing to start is the only safe response to input it cannot parse.
+///
+/// The `healthcheck` subcommand this replaces was dead code that returned
+/// success unconditionally. Nothing invoked it (the container HEALTHCHECK uses
+/// curl against /health/live), and a probe that reports healthy without
+/// checking anything is worse than no probe at all, so it is gone rather than
+/// preserved.
+fn parse_cli(args: &[String]) -> CliAction {
+    let Some(first) = args.first() else {
+        return CliAction::Run;
+    };
+    match first.as_str() {
+        "--version" | "-V" => {
+            CliAction::Print(format!("cogwheel-server {}\n", env!("CARGO_PKG_VERSION")))
+        }
+        "--help" | "-h" => CliAction::Print(USAGE.to_string()),
+        other => CliAction::Fail(format!(
+            "cogwheel-server: unrecognised argument: {other}\n\n{USAGE}"
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
-
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        return Ok(());
+    // Before init_tracing: `--version` should print a version and nothing else,
+    // not a version wrapped in JSON log lines.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    match parse_cli(&args) {
+        CliAction::Run => {}
+        CliAction::Print(message) => {
+            print!("{message}");
+            return Ok(());
+        }
+        CliAction::Fail(message) => {
+            eprint!("{message}");
+            std::process::exit(2);
+        }
     }
+
+    init_tracing();
 
     let config = AppConfig::load()?;
     let storage = Arc::new(Storage::connect(&config.storage.database_url).await?);
@@ -7721,6 +7789,67 @@ mod tests {
             serde_json::from_str(&json).expect("decode tailscale state");
         assert!(parsed.exit_node_enabled);
         assert_eq!(parsed.hostname, "test-node");
+    }
+
+    fn cli(args: &[&str]) -> CliAction {
+        parse_cli(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())
+    }
+
+    // The workspace bans `panic!`, so these render the wrong variant into the
+    // assertion message instead of unwrapping it.
+    fn printed(action: CliAction) -> String {
+        match action {
+            CliAction::Print(text) => text,
+            other => format!("expected Print, got {other:?}"),
+        }
+    }
+
+    fn failed(action: CliAction) -> String {
+        match action {
+            CliAction::Fail(message) => message,
+            other => format!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_arguments_starts_the_server() {
+        assert_eq!(cli(&[]), CliAction::Run);
+    }
+
+    #[test]
+    fn version_prints_the_crate_version_and_does_not_start_the_server() {
+        for flag in ["--version", "-V"] {
+            let text = printed(cli(&[flag]));
+            assert!(
+                text.starts_with("cogwheel-server ") && text.contains(env!("CARGO_PKG_VERSION")),
+                "{flag} produced {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_prints_usage_and_does_not_start_the_server() {
+        for flag in ["--help", "-h"] {
+            let text = printed(cli(&[flag]));
+            assert!(text.contains("Usage:"), "{flag} produced {text:?}");
+        }
+    }
+
+    /// The regression that motivated all of this: an argument the binary does
+    /// not understand must NOT fall through and start a DNS server. Doing so
+    /// on an appliance means a second resolver racing the real one for :53.
+    ///
+    /// `healthcheck` is in this list deliberately -- it used to be accepted and
+    /// return success without checking anything.
+    #[test]
+    fn an_unrecognised_argument_refuses_to_start_the_server() {
+        for arg in ["--verison", "-x", "serve", "healthcheck", "/etc/cogwheel"] {
+            let message = failed(cli(&[arg]));
+            assert!(
+                message.contains(arg) && message.contains("unrecognised"),
+                "{arg} produced {message:?}"
+            );
+        }
     }
 }
 
