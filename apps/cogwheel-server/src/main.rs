@@ -683,6 +683,8 @@ async fn main() -> Result<()> {
     let _ = BLOCK_MODE.set(block_mode);
 
     let storage = Arc::new(Storage::connect(&config.storage.database_url).await?);
+    // Captured before `storage` is moved into the shared app state below.
+    let retention_storage = storage.clone();
 
     let default_source = SourceRecord {
         id: Uuid::from_u128(1),
@@ -1016,6 +1018,53 @@ async fn main() -> Result<()> {
             }
         }
     });
+    // Retention. Without this the history tables grow for the life of the
+    // appliance -- a disk problem on a small disk, and a permanent record of a
+    // household's browsing on a product that exists to prevent exactly that.
+    if config.retention.history_days == 0 {
+        tracing::warn!(
+            "history retention is disabled; classifier verdicts and audit events will be kept \
+             forever and the database will grow without limit. Set \
+             COGWHEEL_RETENTION__HISTORY_DAYS to bound it."
+        );
+    } else {
+        let history_days = i64::from(config.retention.history_days);
+        let interval = Duration::from_secs(config.retention.prune_interval_secs);
+        let mut retention_shutdown = shutdown_rx.clone();
+        tracing::info!(
+            days = config.retention.history_days,
+            every_secs = config.retention.prune_interval_secs,
+            "pruning observed history older than this"
+        );
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // The first tick fires immediately, which is wanted: an upgrade
+            // from a version that never pruned should not wait an hour to act
+            // on a database that may already be large.
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = retention_shutdown.wait_for(|stopping| *stopping) => break,
+                }
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(history_days);
+                match retention_storage.prune_history_before(cutoff).await {
+                    Ok(pruned) if pruned.total() > 0 => tracing::info!(
+                        security_events = pruned.security_events,
+                        audit_events = pruned.audit_events,
+                        notification_deliveries = pruned.notification_deliveries,
+                        %cutoff,
+                        "pruned history past the retention window"
+                    ),
+                    Ok(_) => tracing::debug!(%cutoff, "retention pass found nothing to prune"),
+                    // A failed prune must not take the appliance down: DNS
+                    // resolution does not depend on it, and a locked database
+                    // during a refresh is a transient the next tick handles.
+                    Err(error) => tracing::warn!(%error, "retention pass failed"),
+                }
+            }
+        });
+    }
+
     let app = build_http_app(app_state);
     let listener = tokio::net::TcpListener::bind(config.server.http_bind_addr)
         .await

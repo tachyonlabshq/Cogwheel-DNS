@@ -135,6 +135,35 @@ pub struct AppConfig {
     pub updater: UpdaterConfig,
     pub runtime_guard: RuntimeGuardConfig,
     pub blocking: BlockingConfig,
+    pub retention: RetentionConfig,
+}
+
+/// How long observed history is kept before it is deleted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Days of classifier verdicts, audit events and notification deliveries
+    /// to keep. `0` disables pruning and keeps everything forever, which is
+    /// what every version before this one did.
+    pub history_days: u32,
+    /// How often the prune runs. Hourly by default: often enough that the
+    /// window is honoured closely, rare enough to be invisible on a Pi.
+    pub prune_interval_secs: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            // Bounded by default, deliberately. These tables previously grew
+            // without limit, which is both a disk problem on an appliance disk
+            // and -- for a product whose purpose is to stop other people
+            // recording what a household browses -- an odd thing to do with
+            // that same information. 30 days is long enough to investigate
+            // "why did this break last week" and short enough that the box is
+            // not a permanent archive.
+            history_days: 30,
+            prune_interval_secs: 3_600,
+        }
+    }
 }
 
 /// How a blocked name is answered, and whether a local sink is run for it.
@@ -226,6 +255,22 @@ impl AppConfig {
         }
         if let Some(value) = env_get("COGWHEEL_STORAGE__DATABASE_URL") {
             config.storage.database_url = value;
+        }
+        if let Some(value) = env_get("COGWHEEL_RETENTION__HISTORY_DAYS") {
+            config.retention.history_days = value
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
+        }
+        if let Some(value) = env_get("COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS") {
+            let seconds = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
+            // A floor, not a rejection: a misconfigured 1-second interval would
+            // have the appliance running a delete across its largest tables
+            // continuously, which is a worse failure than ignoring the number.
+            config.retention.prune_interval_secs = seconds.max(60);
         }
         if let Some(value) = env_get("COGWHEEL_BLOCKING__MODE") {
             config.blocking.mode = BlockResponseMode::from_str(&value)?;

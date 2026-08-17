@@ -21,8 +21,9 @@ const MIGRATION_0007: &str = include_str!("../migrations/0007_device_allowed_dom
 const MIGRATION_0008: &str = include_str!("../migrations/0008_device_service_overrides.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notification_deliveries.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_config_version.sql");
+const MIGRATION_0011: &str = include_str!("../migrations/0011_retention_indexes.sql");
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
@@ -129,6 +130,22 @@ pub struct DeviceRecord {
     pub protection_override: String,
     pub allowed_domains: Vec<String>,
     pub service_overrides: Vec<DeviceServiceOverrideRecord>,
+}
+
+/// How many rows a retention pass removed, per table.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrunedHistory {
+    pub security_events: usize,
+    pub audit_events: usize,
+    pub notification_deliveries: usize,
+}
+
+impl PrunedHistory {
+    /// Total rows removed, across every table.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.security_events + self.audit_events + self.notification_deliveries
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +474,51 @@ impl Storage {
         Ok(())
     }
 
+    /// Delete history older than `cutoff`, returning how many rows went.
+    ///
+    /// Nothing used to delete from these tables at all. On a household resolver
+    /// that means two problems that look like one: the database grows without
+    /// limit on an appliance disk, and a permanent record of everything the
+    /// house has ever looked up accumulates on a box in the hall. For a product
+    /// whose entire purpose is to stop other people building that record,
+    /// keeping an unbounded copy is the wrong default.
+    ///
+    /// `created_at` is stored as RFC 3339, which for a fixed offset sorts
+    /// lexicographically in time order, so a string comparison is a correct
+    /// range query and uses the indexes added in migration 0011. The cutoff is
+    /// rendered the same way the writers render it.
+    ///
+    /// Not deleted here: `rulesets` (a handful of rows holding hashes, and the
+    /// active one is referenced), `devices`, `sources` and settings. Those are
+    /// configuration, not history -- pruning them would delete what the
+    /// operator set up rather than what the appliance observed.
+    pub async fn prune_history_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<PrunedHistory, StorageError> {
+        let cutoff = cutoff.to_rfc3339();
+        let connection = lock_connection(&self.connection)?;
+
+        let security_events = connection.execute(
+            "DELETE FROM security_events WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let audit_events = connection.execute(
+            "DELETE FROM audit_events WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        let notification_deliveries = connection.execute(
+            "DELETE FROM notification_deliveries WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+
+        Ok(PrunedHistory {
+            security_events,
+            audit_events,
+            notification_deliveries,
+        })
+    }
+
     pub async fn recent_security_events(
         &self,
         limit: i64,
@@ -673,7 +735,7 @@ fn is_already_applied(error: &rusqlite::Error) -> bool {
 fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     connection.execute_batch(MIGRATION_0001)?;
 
-    const ADDITIVE_MIGRATIONS: [(&str, &str); 9] = [
+    const ADDITIVE_MIGRATIONS: [(&str, &str); 10] = [
         ("0002", MIGRATION_0002),
         ("0003", MIGRATION_0003),
         ("0004", MIGRATION_0004),
@@ -683,6 +745,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
         ("0008", MIGRATION_0008),
         ("0009", MIGRATION_0009),
         ("0010", MIGRATION_0010),
+        ("0011", MIGRATION_0011),
     ];
 
     for (name, sql) in ADDITIVE_MIGRATIONS {
@@ -770,6 +833,130 @@ mod tests {
         assert!(
             !is_already_applied(&disk_full),
             "a real failure must not be treated as an already-applied migration"
+        );
+    }
+
+    async fn storage_with_events(ages_in_days: &[i64]) -> Storage {
+        let storage = Storage::connect("sqlite://:memory:")
+            .await
+            .expect("in-memory storage");
+        for (index, age) in ages_in_days.iter().enumerate() {
+            let created_at = Utc::now() - chrono::Duration::days(*age);
+            storage
+                .record_security_event(&SecurityEventRecord {
+                    id: Uuid::new_v4(),
+                    device_id: None,
+                    device_name: None,
+                    client_ip: "192.0.2.1".to_string(),
+                    domain: format!("host{index}.example"),
+                    classifier_score: 0.9,
+                    severity: "medium".to_string(),
+                    created_at,
+                })
+                .await
+                .expect("record security event");
+            storage
+                .record_audit_event(&AuditEvent {
+                    id: Uuid::new_v4(),
+                    event_type: "test.event".to_string(),
+                    payload: "{}".to_string(),
+                    created_at,
+                })
+                .await
+                .expect("record audit event");
+        }
+        storage
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_history_older_than_the_cutoff_and_keeps_the_rest() {
+        // 1 and 5 days old are inside a 30-day window; 45 and 400 are outside.
+        let storage = storage_with_events(&[1, 5, 45, 400]).await;
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+
+        let pruned = storage
+            .prune_history_before(cutoff)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(
+            pruned.security_events, 2,
+            "two events are older than 30 days"
+        );
+        assert_eq!(pruned.audit_events, 2);
+        assert_eq!(pruned.total(), 4);
+
+        let remaining = storage
+            .recent_security_events(100)
+            .await
+            .expect("read remaining");
+        assert_eq!(remaining.len(), 2, "the recent events must survive");
+    }
+
+    /// A prune on a database with nothing old enough must be a no-op, not an
+    /// error and not a table sweep. It runs hourly on every appliance.
+    #[tokio::test]
+    async fn pruning_is_a_no_op_when_nothing_is_old_enough() {
+        let storage = storage_with_events(&[0, 1, 2]).await;
+
+        let pruned = storage
+            .prune_history_before(Utc::now() - chrono::Duration::days(30))
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(pruned.total(), 0);
+        assert_eq!(
+            storage
+                .recent_security_events(100)
+                .await
+                .expect("read")
+                .len(),
+            3
+        );
+    }
+
+    /// Pruning is repeated forever on a long-running appliance; the second pass
+    /// over already-pruned data must remove nothing rather than error.
+    #[tokio::test]
+    async fn pruning_twice_removes_nothing_the_second_time() {
+        let storage = storage_with_events(&[100, 200]).await;
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+
+        let first = storage.prune_history_before(cutoff).await.expect("first");
+        let second = storage.prune_history_before(cutoff).await.expect("second");
+
+        assert_eq!(first.security_events, 2);
+        assert_eq!(second.total(), 0);
+    }
+
+    /// Configuration is not history. Deleting a device or a source would throw
+    /// away what the operator set up rather than what the appliance observed.
+    #[tokio::test]
+    async fn pruning_never_touches_configuration() {
+        let storage = storage_with_events(&[400]).await;
+        storage
+            .insert_source(&SourceRecord {
+                id: Uuid::from_u128(7),
+                name: "kept".to_string(),
+                url: "data:text/plain,example.com".to_string(),
+                kind: "domains".to_string(),
+                enabled: true,
+                refresh_interval_minutes: 60,
+                profile: "essential".to_string(),
+                verification_strictness: "strict".to_string(),
+            })
+            .await
+            .expect("insert source");
+
+        storage
+            .prune_history_before(Utc::now())
+            .await
+            .expect("prune");
+
+        let sources = storage.list_sources().await.expect("list sources");
+        assert!(
+            sources.iter().any(|source| source.name == "kept"),
+            "configuration must survive a prune that deletes all history"
         );
     }
 }

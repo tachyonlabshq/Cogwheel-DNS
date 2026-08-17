@@ -535,6 +535,11 @@ silently ignored rather than reported.
 | `COGWHEEL_STORAGE__DATABASE_URL` | `sqlite://data/cogwheel.db` | `sqlite://` is stripped. Use an absolute path. |
 | `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated. `ip:port` is cleartext (UDP+TCP); `tls://ip#certname` is DNS-over-TLS and `https://ip#certname` is DNS-over-HTTPS. See [§9.1](#91-encrypting-queries-to-the-upstream-resolver). |
 | `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
+| `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata`, `refused` or `sinkhole`. See [§9.2](#92-how-blocked-names-are-answered-and-anti-adblock-walls). |
+| `COGWHEEL_BLOCKING__SINKHOLE_BIND_ADDR` | `0.0.0.0:80` | Where the sinkhole responder listens. |
+| `COGWHEEL_BLOCKING__SINKHOLE_ADDRESS` | *(auto)* | Address handed to clients for blocked names; taken from the advertised targets when unset. |
+| `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | Days of classifier verdicts, audit events and notification deliveries to keep. `0` keeps everything forever and logs a warning. |
+| `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
 | `COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS` | `example.com,connectivitycheck.gstatic.com` | Health-check probe targets. |
 | `COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
 | `COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
