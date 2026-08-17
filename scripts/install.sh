@@ -360,6 +360,20 @@ resolv_nameserver_lines() {
     for _srv in $UPSTREAM_SERVERS; do
         [ -n "$_srv" ] || continue
         _ip=$_srv
+        # An upstream may be written as tls://ip#certname or
+        # https://ip#certname/path. resolv.conf takes a bare address, and
+        # feeding it the whole URL produced the line "nameserver tls" -- a
+        # resolv.conf with no usable server in it, i.e. a host with no DNS,
+        # which is the single worst state this installer can leave behind.
+        # Reduce to the address before the port logic below runs.
+        #
+        # The host resolving in cleartext to the same provider is deliberate:
+        # /etc/resolv.conf is how THIS machine resolves when Cogwheel is not
+        # running, so it must not depend on Cogwheel, and it cannot speak DoT
+        # without a stub resolver that is not being installed here.
+        _ip=${_ip#*://}
+        _ip=${_ip%%#*}
+        _ip=${_ip%%/*}
         case "$_ip" in
             *']:'*) _ip=${_ip%]:*} ;;   # [2606:4700::1111]:53
             *']'*)  _ip=${_ip%]}   ;;   # [2606:4700::1111]
@@ -368,6 +382,17 @@ resolv_nameserver_lines() {
         esac
         _ip=${_ip#"["}
         [ -n "$_ip" ] || continue
+        # Only literal addresses reach resolv.conf. A hostname or a typo here
+        # becomes a nameserver line the resolver cannot use, and enough of
+        # those means the host silently has no DNS. Anything unusable is
+        # dropped, and if that leaves nothing the caller falls back to public
+        # resolvers rather than writing an empty file.
+        case "$_ip" in
+            *[!0-9.]*[!0-9A-Fa-f:]*|"") warn "ignoring unusable upstream address '$_srv' when writing resolv.conf"; continue ;;
+            *:*) : ;;                                   # IPv6 literal
+            *.*.*.*) : ;;                               # IPv4 literal
+            *) warn "ignoring unusable upstream address '$_srv' when writing resolv.conf"; continue ;;
+        esac
         _lines="${_lines}nameserver ${_ip}
 "
     done

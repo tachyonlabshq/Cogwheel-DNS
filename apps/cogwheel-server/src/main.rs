@@ -3,7 +3,10 @@ use axum::extract::{FromRef, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
+use cogwheel_api::{
+    ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, UpstreamEndpoint, UpstreamProtocol,
+    router,
+};
 use cogwheel_classifier::ClassifierSettings;
 use cogwheel_dns_core::{
     ClassificationEvent, DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot,
@@ -1040,22 +1043,80 @@ fn init_tracing() {
 
 fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
     let mut name_servers = Vec::new();
+    let mut encrypted = 0usize;
+
     for server in servers {
-        let socket_addr: SocketAddr = server
-            .parse()
+        let endpoint = UpstreamEndpoint::parse(server)
             .with_context(|| format!("invalid upstream server: {server}"))?;
+
         // hickory 0.26 models an upstream as one address carrying a list of connections, rather
         // than one entry per protocol. The port moved onto the connection, so it has to be copied
         // across from the configured address or every upstream would silently fall back to 53.
-        let mut udp = ConnectionConfig::udp();
-        udp.port = socket_addr.port();
-        let mut tcp = ConnectionConfig::tcp();
-        tcp.port = socket_addr.port();
-        name_servers.push(NameServerConfig::new(
-            socket_addr.ip(),
-            true,
-            vec![udp, tcp],
-        ));
+        let connections = match endpoint.protocol {
+            UpstreamProtocol::Udp => {
+                let mut udp = ConnectionConfig::udp();
+                udp.port = endpoint.addr.port();
+                let mut tcp = ConnectionConfig::tcp();
+                tcp.port = endpoint.addr.port();
+                vec![udp, tcp]
+            }
+            // No cleartext fallback is added alongside an encrypted transport, and that is the
+            // whole point. A fallback would mean that anything making TLS fail -- a captive
+            // portal, a middlebox, an expired certificate -- silently downgrades every query in
+            // the house back onto the wire in plaintext, which is precisely the outcome the
+            // operator configured this to avoid. If DoT is broken, resolution should fail
+            // visibly and get fixed, not quietly succeed in the clear.
+            UpstreamProtocol::Tls => {
+                let server_name = endpoint
+                    .server_name
+                    .clone()
+                    .context("DoT upstream without a certificate name reached the resolver")?;
+                let mut tls = ConnectionConfig::tls(Arc::from(server_name.as_str()));
+                tls.port = endpoint.addr.port();
+                encrypted += 1;
+                vec![tls]
+            }
+            UpstreamProtocol::Https => {
+                let server_name = endpoint
+                    .server_name
+                    .clone()
+                    .context("DoH upstream without a certificate name reached the resolver")?;
+                let path = endpoint.path.clone().map(|path| Arc::from(path.as_str()));
+                let mut https = ConnectionConfig::https(Arc::from(server_name.as_str()), path);
+                https.port = endpoint.addr.port();
+                encrypted += 1;
+                vec![https]
+            }
+        };
+
+        tracing::info!(
+            upstream = %endpoint,
+            protocol = ?endpoint.protocol,
+            encrypted = endpoint.is_encrypted(),
+            "configured upstream resolver"
+        );
+        name_servers.push(NameServerConfig::new(endpoint.addr.ip(), true, connections));
+    }
+
+    // Said once, plainly, rather than left for the operator to infer. Cleartext is still the
+    // default because it is what works on every network without configuration, but running a
+    // tracker blocker while handing the full browsing history of the house to whoever carries
+    // the packets deserves to be stated rather than assumed.
+    if encrypted == 0 {
+        tracing::warn!(
+            "all upstream resolvers are cleartext DNS on port 53; every domain this network \
+             looks up is visible to the local network and to the ISP. Configure DNS-over-TLS \
+             with e.g. COGWHEEL_UPSTREAM__SERVERS=tls://1.1.1.1#cloudflare-dns.com"
+        );
+    } else if encrypted < name_servers.len() {
+        // Mixing is a real footgun: hickory will happily use whichever responds, so a single
+        // cleartext entry in the list quietly leaks a share of the queries.
+        tracing::warn!(
+            encrypted,
+            total = name_servers.len(),
+            "some upstream resolvers are encrypted and some are cleartext; queries will be \
+             spread across both, so a share of them still travel in plaintext"
+        );
     }
 
     let config = ResolverConfig::from_parts(None, vec![], name_servers);
@@ -7789,6 +7850,42 @@ mod tests {
             serde_json::from_str(&json).expect("decode tailscale state");
         assert!(parsed.exit_node_enabled);
         assert_eq!(parsed.hostname, "test-node");
+    }
+
+    /// hickory builds its TLS client config as `RootCertStore::empty()` and
+    /// only fills it in under a trust-anchor feature. With `tls-ring` alone the
+    /// store stays EMPTY, so every DoT/DoH certificate fails to validate: the
+    /// build succeeds, the TCP connection succeeds, the handshake is rejected,
+    /// and every encrypted query returns SERVFAIL forever. Measured -- that is
+    /// exactly what happened before `webpki-roots` was added.
+    ///
+    /// Nothing else fails if this feature is dropped, which is what makes it
+    /// worth pinning here. A guard on the manifest is crude, but it is the only
+    /// place the mistake can be made and the only place it can be caught
+    /// cheaply; the alternative is a live TLS connection in the test suite.
+    #[test]
+    fn encrypted_upstreams_have_trust_anchors_compiled_in() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Cargo.toml")
+            .canonicalize()
+            .expect("workspace manifest should exist");
+        let text = std::fs::read_to_string(&manifest).expect("read workspace manifest");
+        let hickory = text
+            .split("hickory-resolver = ")
+            .nth(1)
+            .expect("workspace should pin hickory-resolver");
+        let declaration = &hickory[..hickory.find('}').unwrap_or(hickory.len())];
+
+        assert!(
+            declaration.contains("webpki-roots")
+                || declaration.contains("rustls-platform-verifier"),
+            "hickory-resolver must enable a trust-anchor feature or DoT/DoH silently never \
+             resolves; found: {declaration}"
+        );
+        assert!(
+            declaration.contains("tls-ring") || declaration.contains("tls-aws-lc-rs"),
+            "hickory-resolver must enable a TLS feature for DoT upstreams; found: {declaration}"
+        );
     }
 
     fn cli(args: &[&str]) -> CliAction {

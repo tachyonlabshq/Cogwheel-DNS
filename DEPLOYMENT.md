@@ -533,7 +533,7 @@ silently ignored rather than reported.
 | `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` | bound DNS port | The port *clients* use. Stays `53` behind a port mapping. |
 | `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | *(empty)* | Comma-separated addresses shown to users. The installers fill this in from the host's interfaces. |
 | `COGWHEEL_STORAGE__DATABASE_URL` | `sqlite://data/cogwheel.db` | `sqlite://` is stripped. Use an absolute path. |
-| `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated `host:port`; each is used for both UDP and TCP. |
+| `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated. `ip:port` is cleartext (UDP+TCP); `tls://ip#certname` is DNS-over-TLS and `https://ip#certname` is DNS-over-HTTPS. See [§9.1](#91-encrypting-queries-to-the-upstream-resolver). |
 | `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
 | `COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS` | `example.com,connectivitycheck.gstatic.com` | Health-check probe targets. |
 | `COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
@@ -550,6 +550,54 @@ Profile defaults:
 | Refresh interval | 120 s | 300 s | 600 s |
 
 There is no configuration file. Everything is environment variables.
+
+### 9.1 Encrypting queries to the upstream resolver
+
+By default Cogwheel talks to its upstream in **cleartext on port 53**. Blocking
+trackers while the name of every site every device asks for stays readable to
+the local network and to your ISP is an odd place to stop, so upstreams can also
+be DNS-over-TLS (RFC 7858) or DNS-over-HTTPS (RFC 8484):
+
+```sh
+# Cloudflare over DNS-over-TLS
+sudo ./scripts/install.sh --upstream tls://1.1.1.1#cloudflare-dns.com,tls://1.0.0.1#cloudflare-dns.com
+
+# Quad9 (malware filtering) over DNS-over-TLS
+sudo ./scripts/install.sh --upstream tls://9.9.9.9#dns.quad9.net,tls://149.112.112.112#dns.quad9.net
+```
+
+| Form | Transport | Default port |
+|---|---|---|
+| `1.1.1.1:53` | cleartext UDP + TCP | 53 |
+| `tls://1.1.1.1#cloudflare-dns.com` | DNS-over-TLS | 853 |
+| `https://1.1.1.1#cloudflare-dns.com` | DNS-over-HTTPS (path `/dns-query`) | 443 |
+
+**Why the address and the name are given separately.** The text after `#` is the
+name the server's certificate must match, and it is required. The obvious
+alternative — writing `tls://cloudflare-dns.com` and looking the name up — needs
+a bootstrap query, and a bootstrap query is a cleartext query: the exact leak
+being closed would reopen on every restart. Naming both removes the bootstrap.
+There is no option to skip certificate verification, because an encrypted
+channel to an unverified peer is worse than a cleartext one — it looks safe.
+
+**Do not mix encrypted and cleartext upstreams.** Queries are spread across all
+configured servers, so a single cleartext entry silently leaks a share of them.
+Cogwheel logs a warning if you do, and another if every upstream is cleartext.
+
+**No silent downgrade.** An encrypted upstream is registered with *only* its
+encrypted transport. If TLS fails — a captive portal, a middlebox, an expired
+certificate — resolution fails visibly instead of quietly continuing in the
+clear. That is deliberate: a fallback would defeat the reason you configured it.
+
+**Private CAs are not trusted.** Cogwheel validates against the Mozilla root set
+compiled into the binary, so it does not read the host's certificate store. An
+internal resolver using a private CA will not validate. (This also means DoT
+keeps working on a host whose `/etc/ssl` is missing or broken.)
+
+**What this does and does not hide.** Your ISP stops seeing the domains. The
+upstream operator still sees all of them — encryption changes *who* you trust,
+it does not remove the need to trust someone. Queries Cogwheel answers from its
+blocklists or cache never leave the house at all, encrypted or not.
 
 ---
 
