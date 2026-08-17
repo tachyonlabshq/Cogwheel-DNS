@@ -44,6 +44,11 @@ HTTP_PORT="${COGWHEEL_HTTP_PORT:-8080}"
 NETWORK_MODE="${COGWHEEL_NETWORK_MODE:-host}"
 UPSTREAM_SERVERS="${COGWHEEL_UPSTREAM_SERVERS:-1.1.1.1:53,1.0.0.1:53}"
 PROFILE="${COGWHEEL_PROFILE:-home}"
+# How blocked names are answered. `sinkhole` additionally runs a tiny responder
+# on port 80 so blocked requests fail instantly instead of hanging; see
+# DEPLOYMENT.md for what that does and does not achieve.
+BLOCK_MODE="${COGWHEEL_BLOCK_MODE:-null_ip}"
+SINKHOLE_PORT="${COGWHEEL_SINKHOLE_PORT:-80}"
 CPU_LIMIT="${COGWHEEL_CPU_LIMIT:-2.0}"
 MEMORY_LIMIT="${COGWHEEL_MEMORY_LIMIT:-1024m}"
 MEMORY_RESERVATION="${COGWHEEL_MEMORY_RESERVATION:-192m}"
@@ -128,6 +133,17 @@ Options:
   --upstream LIST       Comma-separated upstream resolvers
                         (default: 1.1.1.1:53,1.0.0.1:53)
   --profile NAME        dev | home | smb (default: home)
+  --block-mode MODE     How blocked names are answered (default: null_ip)
+                        null_ip  - 0.0.0.0 / ::   (what every earlier version did)
+                        nxdomain - as if the name did not exist
+                        nodata   - NOERROR with no answers
+                        refused  - REFUSED
+                        sinkhole - this appliance's own address, where a local
+                                   responder answers instantly with an empty
+                                   resource. Blocked requests fail fast instead
+                                   of hanging. Needs port 80. See DEPLOYMENT.md
+                                   for the HTTPS limitation before relying on it.
+  --sinkhole-port PORT  Port the sinkhole responder listens on (default: 80)
   --no-start            Write configuration but do not start the container
   --fix-port-53         Only resolve the port-53 conflict, then exit
   --uninstall           Remove Cogwheel and revert host DNS changes
@@ -152,6 +168,8 @@ parse_args() {
             --network)    NETWORK_MODE="${2:?--network needs a value}"; shift 2 ;;
             --upstream)   UPSTREAM_SERVERS="${2:?--upstream needs a value}"; shift 2 ;;
             --profile)    PROFILE="${2:?--profile needs a value}"; shift 2 ;;
+            --block-mode) BLOCK_MODE="${2:?--block-mode needs a value}"; shift 2 ;;
+            --sinkhole-port) SINKHOLE_PORT="${2:?--sinkhole-port needs a value}"; shift 2 ;;
             --no-start)   SKIP_START=yes; shift ;;
             --fix-port-53) ACTION=fix-port-53; shift ;;
             --uninstall)  ACTION=uninstall; shift ;;
@@ -169,6 +187,10 @@ parse_args() {
     case "$PROFILE" in
         dev|home|smb) ;;
         *) die "--profile must be dev, home or smb; got '$PROFILE'" ;;
+    esac
+    case "$BLOCK_MODE" in
+        null_ip|nxdomain|nodata|refused|sinkhole) ;;
+        *) die "--block-mode must be null_ip, nxdomain, nodata, refused or sinkhole; got '$BLOCK_MODE'" ;;
     esac
 }
 
@@ -657,11 +679,13 @@ write_env_file() {
     if [ "$NETWORK_MODE" = host ]; then
         _dns_bind="0.0.0.0:$DNS_PORT"
         _http_bind="0.0.0.0:$HTTP_PORT"
+        _sinkhole_bind="0.0.0.0:$SINKHOLE_PORT"
     else
         # Bridge mode: bind unprivileged ports inside the container and let
         # Docker publish them on the privileged host ports.
         _dns_bind="0.0.0.0:5353"
         _http_bind="0.0.0.0:8080"
+        _sinkhole_bind="0.0.0.0:8880"
     fi
 
     # Written fresh each run: the installer owns this file. Operator edits
@@ -677,6 +701,8 @@ COGWHEEL_SERVER__ADVERTISED_DNS_PORT=$DNS_PORT
 COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS=$ADVERTISED_TARGETS
 COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db
 COGWHEEL_UPSTREAM__SERVERS=$UPSTREAM_SERVERS
+COGWHEEL_BLOCKING__MODE=$BLOCK_MODE
+COGWHEEL_BLOCKING__SINKHOLE_BIND_ADDR=$_sinkhole_bind
 EOF
     chmod 0644 "$ENV_FILE"
     step "Wrote $ENV_FILE"
@@ -821,6 +847,13 @@ start_container() {
             --publish "$DNS_PORT:5353/udp" \
             --publish "$DNS_PORT:5353/tcp" \
             --publish "$HTTP_PORT:8080/tcp"
+        # The sinkhole only matters if clients can reach it: blocked names are
+        # answered with this host's address, so something has to be listening
+        # there or every blocked request hangs -- the exact failure the mode
+        # exists to remove.
+        if [ "$BLOCK_MODE" = sinkhole ]; then
+            set -- "$@" --publish "$SINKHOLE_PORT:8880/tcp"
+        fi
     fi
 
     # `docker run` can be refused by the daemon rather than by Cogwheel -- an
