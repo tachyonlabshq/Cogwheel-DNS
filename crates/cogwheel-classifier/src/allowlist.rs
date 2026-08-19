@@ -86,7 +86,70 @@ impl Default for Allowlist {
     }
 }
 
+/// The subset whose blocking is *unrecoverable*, rather than merely annoying.
+///
+/// The full [`PROTECTED_SUFFIXES`] list guards the classifier, which is a
+/// statistical guess and should be overruled by anything. Blocklists are
+/// different: a blocklist entry is something a person chose to subscribe to,
+/// and overriding it wholesale would mean an operator who deliberately blocks
+/// `telemetry.microsoft.com` silently does not get what they asked for.
+///
+/// So only this subset outranks a blocklist, and the test for membership is
+/// narrow: does blocking it leave a device unable to fix itself?
+///
+///   - Resolver bootstrap and captive-portal checks. A device that cannot
+///     resolve and cannot detect the portal it is behind has no route back to
+///     working, short of someone physically attending to it.
+///   - Time. A clock that has drifted fails certificate validation for *every*
+///     TLS connection, and the symptom ("nothing works, and the errors are
+///     about certificates") points nowhere near DNS.
+///   - Certificate status endpoints. Same class of failure, same confusing
+///     symptom.
+///
+/// Deliberately absent: the banking, government, OS-vendor and health domains
+/// in the full list. Blocking those is bad, but it is visible, attributable and
+/// reversible by the person who did it.
+pub const CRITICAL_SUFFIXES: &[&str] = &[
+    // Resolver bootstrap and connectivity checks.
+    "one.one.one.one",
+    "dns.google",
+    "resolver1.opendns.com",
+    "cloudflare-dns.com",
+    "quad9.net",
+    "connectivity-check.ubuntu.com",
+    "captive.apple.com",
+    "detectportal.firefox.com",
+    "msftconnecttest.com",
+    "msftncsi.com",
+    "connectivitycheck.gstatic.com",
+    // Time. A wrong clock breaks TLS everywhere.
+    "pool.ntp.org",
+    "ntp.org",
+    "time.apple.com",
+    "time.windows.com",
+    "time.google.com",
+    // Certificate validation.
+    "digicert.com",
+    "letsencrypt.org",
+    "sectigo.com",
+    "globalsign.com",
+    "identrust.com",
+];
+
 impl Allowlist {
+    /// The entries that outrank a blocklist, not just the classifier.
+    ///
+    /// See [`CRITICAL_SUFFIXES`] for why this is a subset rather than the whole
+    /// protected set.
+    pub fn critical() -> Self {
+        Self {
+            suffixes: CRITICAL_SUFFIXES
+                .iter()
+                .map(|suffix| (*suffix).to_string())
+                .collect(),
+        }
+    }
+
     /// The built-in protected set.
     pub fn builtin() -> Self {
         Self {

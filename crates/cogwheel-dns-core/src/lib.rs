@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -86,6 +86,54 @@ pub struct DevicePolicyConfig {
 struct CachedLookup {
     response: Message,
     blocked: bool,
+    /// When this entry stops being usable.
+    ///
+    /// The cache previously had no expiry at all: `Cache::new` sets a capacity
+    /// and nothing else, and no record TTL was ever read. An answer therefore
+    /// stayed until 10,000 other names pushed it out, which on a household
+    /// resolver can be days. Anything that moves addresses -- CDN failover,
+    /// geo-routing, blue/green deploys, dynamic DNS -- kept resolving to an
+    /// address that had stopped serving it, and the failure looks exactly like
+    /// "the ad blocker broke this site".
+    expires_at: Instant,
+}
+
+/// Never cache for less than this, however small the record's TTL.
+///
+/// Some CDNs answer with a TTL of 0 or 1 second. Honouring that literally
+/// turns every page load into a fresh upstream query per name, which on an
+/// encrypted upstream means a TLS round trip on the critical path.
+const MIN_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Never cache for longer than this, however large the record's TTL.
+///
+/// Some records advertise a day or more. Holding an address that long on an
+/// appliance nobody restarts is how a household ends up pinned to a decommissioned
+/// server, so this bounds the worst case regardless of what upstream claims.
+const MAX_CACHE_TTL: Duration = Duration::from_secs(3_600);
+
+/// Lifetime for a response carrying no answer records.
+///
+/// NXDOMAIN and NODATA get a shorter life than a positive answer: a name that
+/// does not exist yet is far more likely to start existing than a live address
+/// is to change, and caching "this does not exist" for an hour is how a
+/// newly-provisioned host stays unreachable long after it came up.
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// How long a response may be cached, from the records it actually contains.
+///
+/// The minimum TTL across the answer section, clamped. The minimum rather than
+/// the maximum because a response is only wholly valid until its shortest-lived
+/// record expires.
+fn cacheable_for(response: &Message) -> Duration {
+    response
+        .answers
+        .iter()
+        .map(|record| record.ttl)
+        .min()
+        .map_or(NEGATIVE_CACHE_TTL, |ttl| {
+            Duration::from_secs(u64::from(ttl)).clamp(MIN_CACHE_TTL, MAX_CACHE_TTL)
+        })
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +141,7 @@ pub struct DnsRuntimeStats {
     upstream_failures_total: AtomicU64,
     fallback_served_total: AtomicU64,
     cache_hits_total: AtomicU64,
+    cache_expired_total: AtomicU64,
     cname_uncloaks_total: AtomicU64,
     cname_blocks_total: AtomicU64,
     queries_total: AtomicU64,
@@ -110,6 +159,7 @@ pub struct DnsRuntimeSnapshot {
     pub upstream_failures_total: u64,
     pub fallback_served_total: u64,
     pub cache_hits_total: u64,
+    pub cache_expired_total: u64,
     pub cname_uncloaks_total: u64,
     pub cname_blocks_total: u64,
     pub queries_total: u64,
@@ -153,8 +203,22 @@ impl DnsRuntime {
             classification_observer: Arc::new(RwLock::new(None)),
             query_activity_observer: Arc::new(RwLock::new(None)),
             global_pause_until: Arc::new(RwLock::new(None)),
-            cache: Cache::new(10_000),
-            fallback_cache: Cache::new(10_000),
+            // The per-entry deadline in `CachedLookup` is what enforces each
+            // record's own TTL. This ceiling is a second, coarser bound so an
+            // expired entry cannot sit in the map occupying capacity until
+            // 10,000 other names evict it.
+            cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(MAX_CACHE_TTL)
+                .build(),
+            // The fallback cache is deliberately allowed to hold stale answers:
+            // its whole job is to keep the household resolving through an
+            // upstream outage, where an hour-old address beats no address. It
+            // is bounded only so it cannot grow without limit.
+            fallback_cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(86_400))
+                .build(),
             stats: Arc::new(DnsRuntimeStats::default()),
         }
     }
@@ -237,6 +301,7 @@ impl DnsRuntime {
             upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
             cache_hits_total: self.stats.cache_hits_total.load(Ordering::Relaxed),
+            cache_expired_total: self.stats.cache_expired_total.load(Ordering::Relaxed),
             cname_uncloaks_total: self.stats.cname_uncloaks_total.load(Ordering::Relaxed),
             cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
             queries_total: self.stats.queries_total.load(Ordering::Relaxed),
@@ -405,11 +470,22 @@ impl DnsRuntime {
             return Ok(response);
         }
 
+        // An entry past its deadline is a miss, not a hit. moka's own
+        // time_to_live is a coarse memory ceiling; this is what actually
+        // enforces the TTL the authoritative server asked for, which is the
+        // difference between following a CDN when it moves and pinning the
+        // household to an address that has stopped answering.
         if let Some(cached) = self.cache.get(&cache_key).await {
-            self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
-            self.emit_query_activity(&domain, client_addr, cached.blocked);
-            self.record_cache_hit_latency(query_start.elapsed().as_nanos());
-            return Ok(response_for_request(&request, &cached.response));
+            if Instant::now() < cached.expires_at {
+                self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
+                self.emit_query_activity(&domain, client_addr, cached.blocked);
+                self.record_cache_hit_latency(query_start.elapsed().as_nanos());
+                return Ok(response_for_request(&request, &cached.response));
+            }
+            self.stats
+                .cache_expired_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.cache.invalidate(&cache_key).await;
         }
 
         // Only submit on a cache miss: a hit means we have seen this name recently and either
@@ -429,6 +505,7 @@ impl DnsRuntime {
                     CachedLookup {
                         response: response.clone(),
                         blocked: true,
+                        expires_at: Instant::now() + cacheable_for(&response),
                     },
                 )
                 .await;
@@ -459,6 +536,7 @@ impl DnsRuntime {
                                 CachedLookup {
                                     response: response.clone(),
                                     blocked: true,
+                                    expires_at: Instant::now() + cacheable_for(&response),
                                 },
                             )
                             .await;
@@ -476,6 +554,7 @@ impl DnsRuntime {
                                 CachedLookup {
                                     response: response.clone(),
                                     blocked: false,
+                                    expires_at: Instant::now() + cacheable_for(&response),
                                 },
                             )
                             .await;
@@ -485,6 +564,10 @@ impl DnsRuntime {
                         self.stats
                             .upstream_failures_total
                             .fetch_add(1, Ordering::Relaxed);
+                        // Deliberately ignores `expires_at`. This path is only
+                        // reached when the upstream has already failed, and an
+                        // expired address the site probably still answers on
+                        // beats SERVFAIL. Staleness here is the feature.
                         if let Some(fallback) = self.fallback_cache.get(&domain).await {
                             self.stats
                                 .fallback_served_total
@@ -505,6 +588,7 @@ impl DnsRuntime {
                 CachedLookup {
                     response: response.clone(),
                     blocked,
+                    expires_at: Instant::now() + cacheable_for(&response),
                 },
             )
             .await;
@@ -848,6 +932,76 @@ fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response_with_ttls(ttls: &[u32]) -> Message {
+        let mut message = Message::query();
+        let name = Name::from_ascii("example.com.").expect("name");
+        for ttl in ttls {
+            message.add_answer(Record::from_rdata(
+                name.clone(),
+                *ttl,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+            ));
+        }
+        message
+    }
+
+    /// The shortest-lived record decides: a response is only wholly valid
+    /// until its first record expires.
+    #[test]
+    fn cache_lifetime_follows_the_smallest_record_ttl() {
+        assert_eq!(
+            cacheable_for(&response_with_ttls(&[300, 60, 900])),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            cacheable_for(&response_with_ttls(&[120])),
+            Duration::from_secs(120)
+        );
+    }
+
+    /// A CDN answering with TTL 0 or 1 would otherwise mean an upstream query
+    /// per name per page load -- a TLS round trip each, on DoT.
+    #[test]
+    fn a_tiny_ttl_is_raised_to_the_floor() {
+        assert_eq!(cacheable_for(&response_with_ttls(&[0])), MIN_CACHE_TTL);
+        assert_eq!(cacheable_for(&response_with_ttls(&[1])), MIN_CACHE_TTL);
+    }
+
+    /// Bounds the worst case: an appliance nobody restarts must not pin the
+    /// household to an address for a day because a record said so.
+    #[test]
+    fn a_huge_ttl_is_capped_at_the_ceiling() {
+        assert_eq!(cacheable_for(&response_with_ttls(&[86_400])), MAX_CACHE_TTL);
+        assert_eq!(
+            cacheable_for(&response_with_ttls(&[u32::MAX])),
+            MAX_CACHE_TTL
+        );
+    }
+
+    /// NXDOMAIN and NODATA carry no answers. Caching "does not exist" for an
+    /// hour keeps a freshly-provisioned host unreachable long after it is up.
+    #[test]
+    fn a_response_with_no_answers_uses_the_shorter_negative_lifetime() {
+        assert_eq!(cacheable_for(&response_with_ttls(&[])), NEGATIVE_CACHE_TTL);
+        assert!(NEGATIVE_CACHE_TTL < MAX_CACHE_TTL);
+    }
+
+    /// The regression this whole change exists for: before it, nothing in the
+    /// DNS path read a TTL at all, and an entry lived until 10,000 other names
+    /// evicted it.
+    #[test]
+    fn every_cached_entry_has_a_deadline_in_the_future_but_bounded() {
+        let lifetime = cacheable_for(&response_with_ttls(&[300]));
+        assert!(lifetime >= MIN_CACHE_TTL && lifetime <= MAX_CACHE_TTL);
+        let entry = CachedLookup {
+            response: response_with_ttls(&[300]),
+            blocked: false,
+            expires_at: Instant::now() + lifetime,
+        };
+        assert!(entry.expires_at > Instant::now());
+        assert!(entry.expires_at <= Instant::now() + MAX_CACHE_TTL);
+    }
     use cogwheel_classifier::{
         Allowlist, ClassifierMode, ClassifierSettings, EngineConfig, ScoringWorker, Sensitivity,
     };
@@ -893,6 +1047,7 @@ mod tests {
             upstream_failures_total: stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: stats.fallback_served_total.load(Ordering::Relaxed),
             cache_hits_total: stats.cache_hits_total.load(Ordering::Relaxed),
+            cache_expired_total: stats.cache_expired_total.load(Ordering::Relaxed),
             cname_uncloaks_total: stats.cname_uncloaks_total.load(Ordering::Relaxed),
             cname_blocks_total: stats.cname_blocks_total.load(Ordering::Relaxed),
             queries_total: stats.queries_total.load(Ordering::Relaxed),
@@ -910,6 +1065,7 @@ mod tests {
                 upstream_failures_total: 0,
                 fallback_served_total: 0,
                 cache_hits_total: 0,
+                cache_expired_total: 0,
                 cname_uncloaks_total: 0,
                 cname_blocks_total: 0,
                 queries_total: 0,

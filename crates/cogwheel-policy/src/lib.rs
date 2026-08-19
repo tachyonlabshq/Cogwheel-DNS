@@ -9,9 +9,12 @@
 //!
 //! [`PolicyEngine::evaluate`] checks, in this fixed order:
 //!
-//! 1. **Protected domains** — an exact (not suffix) match against
+//! 1. **Protected domains** — a **suffix** match on a label boundary against
 //!    [`RulesetArtifact::protected_domains`] always wins and returns [`DecisionKind::Allowed`]. A
-//!    protected `example.com` does *not* protect `www.example.com`.
+//!    protected `example.com` also protects `www.example.com`, but not `notexample.com`. This was
+//!    an exact match until it became clear that the names looked up during certificate validation,
+//!    captive-portal detection and time sync are almost all subdomains, so an apex-only safety net
+//!    caught essentially none of them.
 //! 2. **Allow rules** — the first matching [`RuleAction::Allow`] rule wins.
 //! 3. **Block rules** — the first matching [`RuleAction::Block`] rule wins, and the decision
 //!    carries the artifact's single, ruleset-wide [`BlockMode`] — there is no per-rule block mode.
@@ -235,7 +238,25 @@ impl PolicyEngine {
     pub fn evaluate(&self, domain: &str) -> Decision {
         let normalized = normalize_domain(domain);
 
-        if self.artifact.protected_domains.contains(&normalized) {
+        // Suffix match on a label boundary, not an exact hit.
+        //
+        // This used to be a plain `contains`, which meant protecting
+        // `letsencrypt.org` did nothing for `r3.o.lencr.org`-style subdomains,
+        // or protecting `chase.com` nothing for `secure.chase.com`. A safety
+        // net that only catches the apex is not a safety net -- the names that
+        // actually get looked up during certificate validation, captive-portal
+        // detection and time sync are almost all subdomains.
+        //
+        // `example.com` still does NOT protect `notexample.com`: the byte
+        // before the suffix must be a dot. Same rule the blocklist matcher
+        // uses, so protection and blocking agree on what "under this domain"
+        // means.
+        if self
+            .artifact
+            .protected_domains
+            .iter()
+            .any(|protected| is_at_or_under(&normalized, protected))
+        {
             return Decision {
                 domain: normalized,
                 kind: DecisionKind::Allowed,
@@ -290,6 +311,17 @@ impl PolicyEngine {
     }
 }
 
+/// Whether `domain` is `suffix` itself or a name beneath it.
+///
+/// Label-boundary aware and allocation-free: this runs once per protected entry
+/// per query on the DNS hot path.
+fn is_at_or_under(domain: &str, suffix: &str) -> bool {
+    domain == suffix
+        || (domain.len() > suffix.len()
+            && domain.ends_with(suffix)
+            && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.')
+}
+
 /// Canonicalise a domain the same way for both rule storage and lookup.
 ///
 /// Trims leading/trailing whitespace, strips a single trailing root dot (`"example.com."` →
@@ -304,6 +336,66 @@ pub fn normalize_domain(domain: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn engine_protecting(protected: &[&str], blocked: &[&str]) -> PolicyEngine {
+        let rules = blocked
+            .iter()
+            .map(|domain| suffix_rule(domain, RuleAction::Block))
+            .collect::<Vec<_>>();
+        let protected = protected
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect::<HashSet<_>>();
+        PolicyEngine::new(RulesetArtifact::new(rules, protected, BlockMode::NullIp))
+    }
+
+    /// The gap this closes: a blocklist covering an OCSP responder or an NTP
+    /// pool could take a device off the network, and the protected list did
+    /// not apply to blocklists at all.
+    #[test]
+    fn a_protected_domain_outranks_a_blocklist_rule() {
+        let engine = engine_protecting(&["letsencrypt.org"], &["letsencrypt.org"]);
+        let decision = engine.evaluate("letsencrypt.org");
+        assert!(matches!(decision.kind, DecisionKind::Allowed));
+        assert_eq!(decision.reason, "protected domain");
+    }
+
+    /// Protection used to be an exact match, so the apex was covered and every
+    /// name actually looked up during certificate validation was not.
+    #[test]
+    fn protection_covers_subdomains_not_just_the_apex() {
+        let engine = engine_protecting(&["letsencrypt.org"], &["letsencrypt.org"]);
+        for host in ["r3.letsencrypt.org", "ocsp.int-x3.letsencrypt.org"] {
+            let decision = engine.evaluate(host);
+            assert!(
+                matches!(decision.kind, DecisionKind::Allowed),
+                "{host} should be protected"
+            );
+        }
+    }
+
+    /// Suffix matching must stop at a label boundary, or protecting
+    /// `apple.com` would quietly protect `evil-apple.com` too.
+    #[test]
+    fn protection_stops_at_a_label_boundary() {
+        let engine = engine_protecting(&["apple.com"], &["notapple.com", "evil-apple.com"]);
+        for host in ["notapple.com", "evil-apple.com"] {
+            let decision = engine.evaluate(host);
+            assert!(
+                matches!(decision.kind, DecisionKind::Blocked(_)),
+                "{host} must NOT inherit protection from apple.com"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unprotected_domain_is_still_blocked_normally() {
+        let engine = engine_protecting(&["letsencrypt.org"], &["doubleclick.net"]);
+        assert!(matches!(
+            engine.evaluate("ads.doubleclick.net").kind,
+            DecisionKind::Blocked(_)
+        ));
+    }
 
     fn suffix_rule(pattern: &str, action: RuleAction) -> Rule {
         Rule {

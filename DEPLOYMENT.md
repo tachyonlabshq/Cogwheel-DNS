@@ -657,6 +657,70 @@ from the advertised targets the installers detect; set
 determine one, the server refuses to start rather than quietly blocking a
 different way.
 
+### 9.3 Caching, and what to do when a site breaks
+
+**Cogwheel caches answers.** Two caches, both bounded at 10,000 entries:
+
+| Cache | Holds | Lifetime |
+|---|---|---|
+| Response cache | the answer for a name, per policy scope | the record's own TTL, clamped to 5 s – 1 h |
+| Fallback cache | last known-good answer per name | up to 24 h, served **only** when upstream fails |
+
+The response cache honours the TTL the authoritative server published, taking
+the shortest TTL in the answer. That matters more than it sounds: a cache that
+ignores TTLs keeps handing out an address after the site has moved, and
+CDN failover, geo-routing and blue/green deploys all rely on short TTLs being
+respected. Answers with no records at all (`NXDOMAIN`, `NODATA`) are held for
+only 60 s, so a host that has just been provisioned does not stay unreachable.
+
+The fallback cache deliberately serves *stale* answers, but only after the
+upstream has already failed — an hour-old address beats no DNS at all.
+
+A policy change (new blocklist, device profile edit) invalidates the response
+cache immediately, so an unblock takes effect on the next query rather than
+whenever the entry happens to age out.
+
+#### When a site breaks
+
+DNS filtering breaks sites in three distinct ways, and the fix differs:
+
+**1. Something it needs is on a blocklist.** The usual cause. Blocklists are
+maintained by other people and occasionally include a domain a site genuinely
+depends on — a login provider, a payment iframe, a CDN.
+
+- Fastest check: `POST /api/v1/runtime/pause` pauses filtering entirely. If the
+  site starts working, it is a blocking problem; if not, look elsewhere before
+  spending time on blocklists.
+- Then narrow it: the Activity view shows what was blocked while the page
+  loaded. Add the offending name to a device's allowed domains, or remove the
+  list that supplied it (`/api/v1/settings/blocklists`).
+- `POST /api/v1/rulesets/rollback` reverts to the previous compiled ruleset if a
+  list update is what broke things.
+
+**2. The classifier got it wrong.** It ships in Monitor mode and blocks nothing
+until you turn it on, so this only applies once enforcement is enabled. Lower
+the sensitivity, or report the domain — the correction is stored, and adaptation
+only applies it if it does not make false positives worse.
+
+**3. It is not blocking at all.** Worth ruling out early, because it looks
+identical from the browser: a stale cached address, an upstream that is failing,
+or a device that has cached the old answer itself. `/api/v1/runtime` reports
+cache hits, expiries, upstream failures and fallback responses. Browsers and
+phones keep their own DNS caches, so test with `dig` before concluding anything.
+
+#### The safety net
+
+Some names are never blocked, whatever a blocklist says: resolver bootstrap and
+captive-portal checks, NTP, and certificate-status endpoints. Blocking those can
+leave a device with no route back to working — a clock that has drifted fails
+TLS everywhere, with errors that point nowhere near DNS.
+
+That protection is a **suffix** match, so it covers subdomains, which is where
+those lookups actually happen. It is deliberately a *subset* of the larger list
+that guards the classifier: broad domains like OS vendors and banks stay
+classifier-only, because a blocklist entry covering those is a choice someone
+made, and silently overruling it would be its own surprise.
+
 ---
 
 ## 10. Upgrades

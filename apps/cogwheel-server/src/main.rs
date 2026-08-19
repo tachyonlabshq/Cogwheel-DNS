@@ -711,7 +711,26 @@ async fn main() -> Result<()> {
         "ads.example.com\ntracker.example.com",
     );
 
-    let protected_domains = Arc::new(HashSet::from(["connectivitycheck.gstatic.com".to_string()]));
+    // Seeded from the classifier's CRITICAL tier, not from one hardcoded name.
+    //
+    // The 52-entry protected list guarded classifier verdicts only, while the
+    // blocklist path -- which does most of the actual blocking -- was protected
+    // by exactly one exact-match domain. So a list that happened to cover an
+    // OCSP responder, an NTP pool or a captive-portal check could take a device
+    // off the network in a way that looks nothing like a DNS problem, and the
+    // safety net that existed to prevent precisely that did not apply.
+    //
+    // Only the critical subset is promoted here. The broader entries (banking,
+    // OS vendors, government) stay classifier-only on purpose: a blocklist
+    // entry covering those is a choice someone made, and silently overruling it
+    // would be its own kind of surprise.
+    let protected_domains = Arc::new(
+        cogwheel_classifier::Allowlist::critical()
+            .suffixes()
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>(),
+    );
     let verification = verify_candidate(std::slice::from_ref(&parsed), &protected_domains);
     anyhow::ensure!(
         verification.passed,
@@ -5331,6 +5350,7 @@ fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
             upstream_failures_total: 0,
             fallback_served_total: 0,
             cache_hits_total: 0,
+            cache_expired_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
             queries_total: 0,
@@ -7087,6 +7107,7 @@ mod tests {
             upstream_failures_total: 1,
             fallback_served_total: 0,
             cache_hits_total: 0,
+            cache_expired_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
             queries_total: 100,
@@ -7102,6 +7123,7 @@ mod tests {
             upstream_failures_total: 3,
             fallback_served_total: 1,
             cache_hits_total: 0,
+            cache_expired_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
             queries_total: 200,
@@ -7130,6 +7152,7 @@ mod tests {
             upstream_failures_total: 1,
             fallback_served_total: 1,
             cache_hits_total: 0,
+            cache_expired_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
             queries_total: 100,
@@ -7145,6 +7168,7 @@ mod tests {
             upstream_failures_total: 1,
             fallback_served_total: 1,
             cache_hits_total: 2,
+            cache_expired_total: 0,
             cname_uncloaks_total: 1,
             cname_blocks_total: 0,
             queries_total: 200,
