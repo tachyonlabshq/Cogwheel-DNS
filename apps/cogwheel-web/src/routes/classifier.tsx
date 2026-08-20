@@ -317,6 +317,7 @@ export function ClassifierScreen() {
         >
           <DataTable
             columns={detectionColumns}
+            stackBelow="xl"
             empty={{
               icon: BrainCircuitIcon,
               title: "No detections recorded yet",

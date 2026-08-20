@@ -178,6 +178,7 @@ export function DevicesScreen() {
     {
       key: "policy",
       header: "Policy",
+      hideBelow: "md",
       render: (row) => (
         <Badge variant={row.policy_mode === "custom" ? "default" : "secondary"}>
           {row.policy_mode === "custom" ? "Custom" : "Household default"}
@@ -189,6 +190,7 @@ export function DevicesScreen() {
       key: "profile",
       header: "Profile",
       hideOnStack: true,
+      hideBelow: "2xl",
       render: (row) => row.blocklist_profile_override ?? "Default",
     },
     {
@@ -206,6 +208,7 @@ export function DevicesScreen() {
       header: "Service rules",
       align: "end",
       hideOnStack: true,
+      hideBelow: "2xl",
       render: (row) => <span className="tabular">{formatCount(row.service_overrides.length)}</span>,
       sortValue: (row) => row.service_overrides.length,
     },

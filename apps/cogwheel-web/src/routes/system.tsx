@@ -181,7 +181,7 @@ function DiagnosticsPane() {
   ];
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         actions={
           <Button
@@ -307,6 +307,7 @@ function DiagnosticsPane() {
 
         <DataTable
           columns={latencyColumns}
+          stackBelow="xl"
           empty={{
             icon: GaugeIcon,
             title: "No latency samples yet",
@@ -764,7 +765,7 @@ function SyncPane() {
   ];
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         description="This node's identity and replication state."
         title="Node"
@@ -1043,7 +1044,7 @@ function BackupPane() {
   }, [restoreText]);
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <NoticeBanner
         detail="A backup contains sources, devices, classifier settings and notification settings — including the webhook URL in cleartext. It omits block profiles, service toggles, sync settings, rulesets and audit history."
         title="What a backup does and does not contain"
@@ -1288,7 +1289,7 @@ function AuditPane({
   const expandedEvent = rows.find((row) => row.id === expanded);
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         description="Suggested next steps, computed from the current dashboard state."
         title="Guided recovery"

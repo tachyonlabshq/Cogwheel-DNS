@@ -167,7 +167,7 @@ function AlertsPane() {
   }
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         actions={
           notifications.enabled ? (
@@ -417,7 +417,7 @@ function IntegrationsPane() {
   };
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <NoticeBanner
         detail="Neither subsystem below is wired into DNS resolution on this build. Their settings are held in memory only and are lost when the appliance restarts."
         title="Threat intelligence and federated learning are not active"
@@ -616,7 +616,7 @@ function GuardPane() {
   const guard = data.settings.runtime_guard;
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         description="The runtime guard decides when the dashboard reports “Needs attention” and when a new ruleset is auto-rolled-back. It is configured by environment variables on the appliance; there is no endpoint to change it from here."
         title="Runtime guard (read-only)"

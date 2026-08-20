@@ -231,6 +231,7 @@ export function ActivityScreen() {
             ) : (
               <DataTable
                 columns={streamColumns}
+                stackBelow="xl"
                 empty={{
                   icon: ActivityIcon,
                   title: "No rows match these filters",
@@ -256,6 +257,7 @@ export function ActivityScreen() {
         >
           <DataTable
             columns={eventColumns}
+            stackBelow="2xl"
             empty={{
               icon: ShieldAlertIcon,
               title: "No risky events recorded",

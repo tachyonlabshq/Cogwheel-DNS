@@ -4,12 +4,56 @@ import { cn } from "@/lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState, ErrorState, LoadingSkeleton } from "@/components/app/states";
 
+/** Container-query widths a table may shed a column or restack at. */
+export type ColumnBreakpoint = "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl";
+
+/**
+ * All three maps are written out in full because Tailwind scans for literal
+ * class names; building these by interpolation would compile to nothing.
+ */
+const SHED_BELOW: Record<ColumnBreakpoint, string> = {
+  sm: "hidden @sm:table-cell",
+  md: "hidden @md:table-cell",
+  lg: "hidden @lg:table-cell",
+  xl: "hidden @xl:table-cell",
+  "2xl": "hidden @2xl:table-cell",
+  "3xl": "hidden @3xl:table-cell",
+  "4xl": "hidden @4xl:table-cell",
+};
+
+const TABLE_FROM: Record<ColumnBreakpoint, string> = {
+  sm: "hidden @sm:block",
+  md: "hidden @md:block",
+  lg: "hidden @lg:block",
+  xl: "hidden @xl:block",
+  "2xl": "hidden @2xl:block",
+  "3xl": "hidden @3xl:block",
+  "4xl": "hidden @4xl:block",
+};
+
+const CARDS_BELOW: Record<ColumnBreakpoint, string> = {
+  sm: "@sm:hidden",
+  md: "@md:hidden",
+  lg: "@lg:hidden",
+  xl: "@xl:hidden",
+  "2xl": "@2xl:hidden",
+  "3xl": "@3xl:hidden",
+  "4xl": "@4xl:hidden",
+};
+
 export type Column<Row> = {
   key: string;
   header: string;
   align?: "start" | "end";
-  /** Hidden below `md`, where the table restacks as cards. */
+  /** Hidden in the stacked card form, where space is tightest. */
   hideOnStack?: boolean;
+  /**
+   * Container width below which this column is dropped from the table form.
+   * Measured against the table's own container rather than the viewport: these
+   * tables sit in side-by-side layouts, so a wider window can mean a *narrower*
+   * table, and a viewport query would shed columns exactly backwards.
+   */
+  hideBelow?: ColumnBreakpoint;
   className?: string;
   headClassName?: string;
   render: (row: Row) => React.ReactNode;
@@ -29,6 +73,12 @@ export type DataTableProps<Row> = {
   /** Accessible label describing what the row click does. */
   rowActionLabel?: (row: Row) => string;
   caption?: string;
+  /**
+   * Container width below which the rows render as stacked cards instead of a
+   * table. Defaults to `sm`, which is where a two-or-three column table stops
+   * fitting. Wide tables should raise it rather than let themselves be crushed.
+   */
+  stackBelow?: ColumnBreakpoint;
   className?: string;
 };
 
@@ -36,9 +86,14 @@ type SortState = { key: string; direction: "asc" | "desc" } | null;
 
 /**
  * One table implementation for the whole app so loading, empty, error and
- * populated states are impossible to forget. Below `md` the same rows render as
- * stacked label/value cards — the brief forbids horizontal body scroll at
- * 375px, and a six-column table cannot honour that any other way.
+ * populated states are impossible to forget. When the container is too narrow
+ * for the table, the same rows render as stacked label/value cards instead —
+ * the brief forbids horizontal body scroll at 375px, and a six-column table
+ * cannot honour that any other way.
+ *
+ * Every width decision here is a container query, never a viewport one. Several
+ * of these tables sit in a side-by-side grid, so a wider window hands the table
+ * a *narrower* box; a viewport query would restack them exactly backwards.
  */
 export function DataTable<Row>({
   columns,
@@ -51,6 +106,7 @@ export function DataTable<Row>({
   onRowClick,
   rowActionLabel,
   caption,
+  stackBelow = "sm",
   className,
 }: DataTableProps<Row>) {
   const [sort, setSort] = React.useState<SortState>(null);
@@ -95,15 +151,15 @@ export function DataTable<Row>({
   const interactive = Boolean(onRowClick);
 
   return (
-    <div className={cn("min-w-0", className)}>
+    <div className={cn("@container min-w-0", className)}>
       {error ? (
         <p className="mb-3 text-muted-foreground text-xs">
           Showing last-known rows. Latest refresh failed: {error}
         </p>
       ) : null}
 
-      {/* Table form, md and up. Scrolls inside its own container, never the body. */}
-      <div className="hidden overflow-x-auto md:block">
+      {/* Table form. Scrolls inside its own container, never the body. */}
+      <div className={cn("overflow-x-auto", TABLE_FROM[stackBelow])}>
         <Table>
           {caption ? <caption className="sr-only">{caption}</caption> : null}
           <TableHeader>
@@ -124,6 +180,7 @@ export function DataTable<Row>({
                     className={cn(
                       "text-xs",
                       column.align === "end" && "text-right",
+                      column.hideBelow && SHED_BELOW[column.hideBelow],
                       column.headClassName,
                     )}
                     key={column.key}
@@ -174,6 +231,7 @@ export function DataTable<Row>({
                     className={cn(
                       "max-w-[22rem] truncate",
                       column.align === "end" && "text-right",
+                      column.hideBelow && SHED_BELOW[column.hideBelow],
                       column.className,
                     )}
                     key={column.key}
@@ -187,8 +245,8 @@ export function DataTable<Row>({
         </Table>
       </div>
 
-      {/* Stacked form, below md. */}
-      <ul className="flex flex-col gap-2 md:hidden">
+      {/* Stacked form, for containers too narrow to hold the table. */}
+      <ul className={cn("flex flex-col gap-2", CARDS_BELOW[stackBelow])}>
         {sorted.map((row) => {
           const body = (
             <dl className="grid gap-1.5">

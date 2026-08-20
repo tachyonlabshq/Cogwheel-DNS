@@ -184,7 +184,7 @@ function BlocklistsPane() {
       hideOnStack: true,
       render: (row) => (
         <span className="font-mono text-muted-foreground text-xs" title={row.url}>
-          {truncateMiddle(row.url, 44)}
+          {truncateMiddle(row.url, 36)}
         </span>
       ),
     },
@@ -252,7 +252,7 @@ function BlocklistsPane() {
   ];
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionCard
         description="Any domain, hosts or adblock-format list reachable from the appliance. `data:` URLs are accepted for small inline lists."
         footer={
@@ -325,6 +325,7 @@ function BlocklistsPane() {
         />
         <DataTable
           columns={columns}
+          stackBelow="3xl"
           empty={{
             icon: HardDriveIcon,
             title: search ? "No sources match that search" : "No blocklists configured",

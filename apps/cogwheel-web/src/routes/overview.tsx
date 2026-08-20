@@ -82,6 +82,7 @@ export function OverviewScreen() {
       key: "client",
       header: "Client IP",
       hideOnStack: true,
+      hideBelow: "md",
       render: (row) => <span className="font-mono text-xs">{row.client_ip}</span>,
     },
     {
