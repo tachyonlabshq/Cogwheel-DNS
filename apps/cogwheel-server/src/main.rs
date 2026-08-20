@@ -3,8 +3,6 @@ use axum::extract::{FromRef, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-mod sinkhole;
-
 use cogwheel_api::{
     ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, UpstreamEndpoint, UpstreamProtocol,
     router,
@@ -36,7 +34,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
@@ -541,52 +539,15 @@ fn configured_block_mode() -> BlockMode {
 }
 
 /// Turn the configured mode into the response the DNS core will send.
-///
-/// Sinkhole is the only one that needs anything beyond a direct mapping: it
-/// answers with an address on this machine, so it needs to know which address
-/// clients can actually reach. Guessing wrong here is worse than not offering
-/// the mode at all -- every blocked name would resolve to somewhere that does
-/// not answer, which is a slow failure instead of the fast one it replaced.
-fn resolve_block_mode(
-    blocking: &cogwheel_api::BlockingConfig,
-    advertised: &[String],
-) -> Result<BlockMode> {
+fn resolve_block_mode(blocking: &cogwheel_api::BlockingConfig) -> BlockMode {
     use cogwheel_api::BlockResponseMode;
 
-    Ok(match blocking.mode {
+    match blocking.mode {
         BlockResponseMode::NullIp => BlockMode::NullIp,
         BlockResponseMode::NxDomain => BlockMode::NxDomain,
         BlockResponseMode::NoData => BlockMode::NoData,
         BlockResponseMode::Refused => BlockMode::Refused,
-        BlockResponseMode::Sinkhole => {
-            let explicit = blocking.sinkhole_address;
-            let discovered = explicit.or_else(|| {
-                advertised
-                    .iter()
-                    .filter_map(|target| target.trim().parse::<IpAddr>().ok())
-                    .find(|address| !address.is_loopback() && !address.is_unspecified())
-            });
-            let address = discovered.context(
-                "blocking mode is 'sinkhole' but this appliance does not know its own address. \
-                 Set COGWHEEL_BLOCKING__SINKHOLE_ADDRESS to the address clients reach it on, or \
-                 set COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS (the installers do this for you)",
-            )?;
-            match address {
-                IpAddr::V4(ipv4) => BlockMode::CustomIp {
-                    ipv4: Some(ipv4),
-                    // No IPv6 answer at all rather than a wrong one. Returning
-                    // an IPv4-derived guess for AAAA would send v6 clients to
-                    // an address nothing listens on; an empty AAAA makes them
-                    // fall back to the A record, which does work.
-                    ipv6: None,
-                },
-                IpAddr::V6(ipv6) => BlockMode::CustomIp {
-                    ipv4: None,
-                    ipv6: Some(ipv6),
-                },
-            }
-        }
-    })
+    }
 }
 
 const USAGE: &str = "\
@@ -668,17 +629,8 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
 
     // Resolved before the first ruleset is compiled, because the block response
-    // is baked into the ruleset artifact rather than consulted per query. A
-    // failure here is fatal on purpose: "sinkhole was requested but we cannot
-    // work out our own address" must not degrade into silently blocking with
-    // something else, because the operator would have no way to notice.
-    let advertised_targets = std::env::var("COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|target| target.trim().to_string())
-        .filter(|target| !target.is_empty())
-        .collect::<Vec<_>>();
-    let block_mode = resolve_block_mode(&config.blocking, &advertised_targets)?;
+    // is baked into the ruleset artifact rather than consulted per query.
+    let block_mode = resolve_block_mode(&config.blocking);
     tracing::info!(mode = ?config.blocking.mode, response = ?block_mode, "blocked names will be answered with this");
     let _ = BLOCK_MODE.set(block_mode);
 
@@ -1088,37 +1040,6 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.server.http_bind_addr)
         .await
         .context("bind http listener")?;
-
-    // The sink for blocked names, when the operator asked for one. Bound here
-    // rather than lazily, so a port conflict is a startup failure the operator
-    // sees immediately instead of a blocked page mysteriously hanging later.
-    if config.blocking.mode == cogwheel_api::BlockResponseMode::Sinkhole {
-        let sinkhole_listener = tokio::net::TcpListener::bind(config.blocking.sinkhole_bind_addr)
-            .await
-            .with_context(|| {
-                format!(
-                    "bind sinkhole listener on {}. Blocked names are being answered with this \
-                     appliance's address, so something must answer there; free the port or set \
-                     COGWHEEL_BLOCKING__SINKHOLE_BIND_ADDR",
-                    config.blocking.sinkhole_bind_addr
-                )
-            })?;
-        let mut sinkhole_shutdown = shutdown_rx.clone();
-        tracing::info!(
-            bind = %config.blocking.sinkhole_bind_addr,
-            "serving blocked hostnames from the local sinkhole"
-        );
-        tokio::spawn(async move {
-            let served = axum::serve(sinkhole_listener, sinkhole::router())
-                .with_graceful_shutdown(async move {
-                    let _ = sinkhole_shutdown.wait_for(|stopping| *stopping).await;
-                })
-                .await;
-            if let Err(error) = served {
-                tracing::warn!(%error, "sinkhole listener stopped");
-            }
-        });
-    }
 
     // Graceful shutdown. Without this the process took the kernel default on SIGTERM and died
     // instantly, dropping every in-flight DNS query and upstream request and severing open SSE
@@ -8136,10 +8057,7 @@ mod tests {
     }
 
     fn blocking(mode: cogwheel_api::BlockResponseMode) -> cogwheel_api::BlockingConfig {
-        cogwheel_api::BlockingConfig {
-            mode,
-            ..cogwheel_api::BlockingConfig::default()
-        }
+        cogwheel_api::BlockingConfig { mode }
     }
 
     #[test]
@@ -8148,8 +8066,7 @@ mod tests {
             cogwheel_api::BlockingConfig::default().mode,
             cogwheel_api::BlockResponseMode::NullIp
         );
-        let resolved = resolve_block_mode(&cogwheel_api::BlockingConfig::default(), &[])
-            .expect("the default must always resolve");
+        let resolved = resolve_block_mode(&cogwheel_api::BlockingConfig::default());
         assert_eq!(resolved, BlockMode::NullIp);
     }
 
@@ -8162,90 +8079,15 @@ mod tests {
             (Mode::NoData, BlockMode::NoData),
             (Mode::Refused, BlockMode::Refused),
         ] {
-            let resolved = resolve_block_mode(&blocking(mode), &[]).expect("should resolve");
+            let resolved = resolve_block_mode(&blocking(mode));
             assert_eq!(resolved, expected, "{mode:?}");
         }
-    }
-
-    #[test]
-    fn sinkhole_prefers_the_explicitly_configured_address() {
-        let mut config = blocking(cogwheel_api::BlockResponseMode::Sinkhole);
-        config.sinkhole_address = Some("192.0.2.10".parse().expect("literal"));
-        let resolved = resolve_block_mode(&config, &["198.51.100.7".to_string()])
-            .expect("explicit address should resolve");
-        assert_eq!(
-            resolved,
-            BlockMode::CustomIp {
-                ipv4: Some("192.0.2.10".parse().expect("literal")),
-                ipv6: None,
-            }
-        );
-    }
-
-    /// The advertised list starts with the machine's hostname and can contain
-    /// loopback, neither of which a client on the LAN can reach.
-    #[test]
-    fn sinkhole_discovers_a_routable_address_and_skips_names_and_loopback() {
-        let resolved = resolve_block_mode(
-            &blocking(cogwheel_api::BlockResponseMode::Sinkhole),
-            &[
-                "raspberrypi".to_string(),
-                "127.0.0.1".to_string(),
-                "0.0.0.0".to_string(),
-                "192.168.1.50".to_string(),
-            ],
-        )
-        .expect("should find the routable address");
-        assert_eq!(
-            resolved,
-            BlockMode::CustomIp {
-                ipv4: Some("192.168.1.50".parse().expect("literal")),
-                ipv6: None,
-            }
-        );
-    }
-
-    /// Answering AAAA with something derived from an IPv4 address would send
-    /// v6 clients to an address nothing listens on. An absent AAAA makes them
-    /// fall back to the A record, which does answer.
-    #[test]
-    fn sinkhole_never_fabricates_the_address_family_it_does_not_have() {
-        let v6 = resolve_block_mode(
-            &blocking(cogwheel_api::BlockResponseMode::Sinkhole),
-            &["fd00::5".to_string()],
-        )
-        .expect("should resolve");
-        assert_eq!(
-            v6,
-            BlockMode::CustomIp {
-                ipv4: None,
-                ipv6: Some("fd00::5".parse().expect("literal")),
-            }
-        );
-    }
-
-    /// Silently falling back to another block mode would leave the operator
-    /// believing the sink is in use while it is not.
-    #[test]
-    fn sinkhole_without_any_usable_address_fails_startup_with_guidance() {
-        let error = resolve_block_mode(
-            &blocking(cogwheel_api::BlockResponseMode::Sinkhole),
-            &["raspberrypi".to_string(), "127.0.0.1".to_string()],
-        )
-        .expect_err("must not silently pick another mode");
-        let message = error.to_string();
-        assert!(
-            message.contains("COGWHEEL_BLOCKING__SINKHOLE_ADDRESS"),
-            "{message}"
-        );
     }
 
     #[test]
     fn block_mode_is_parsed_from_the_spellings_people_actually_write() {
         use cogwheel_api::BlockResponseMode as Mode;
         for (text, expected) in [
-            ("sinkhole", Mode::Sinkhole),
-            ("SINKHOLE", Mode::Sinkhole),
             (" nxdomain ", Mode::NxDomain),
             ("null_ip", Mode::NullIp),
             ("null-ip", Mode::NullIp),

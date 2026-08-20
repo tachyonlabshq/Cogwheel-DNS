@@ -535,9 +535,7 @@ silently ignored rather than reported.
 | `COGWHEEL_STORAGE__DATABASE_URL` | `sqlite://data/cogwheel.db` | `sqlite://` is stripped. Use an absolute path. |
 | `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated. `ip:port` is cleartext (UDP+TCP); `tls://ip#certname` is DNS-over-TLS and `https://ip#certname` is DNS-over-HTTPS. See [§9.1](#91-encrypting-queries-to-the-upstream-resolver). |
 | `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
-| `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata`, `refused` or `sinkhole`. See [§9.2](#92-how-blocked-names-are-answered-and-anti-adblock-walls). |
-| `COGWHEEL_BLOCKING__SINKHOLE_BIND_ADDR` | `0.0.0.0:80` | Where the sinkhole responder listens. |
-| `COGWHEEL_BLOCKING__SINKHOLE_ADDRESS` | *(auto)* | Address handed to clients for blocked names; taken from the advertised targets when unset. |
+| `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata` or `refused`. See [§9.2](#92-how-blocked-names-are-answered). |
 | `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | Days of classifier verdicts, audit events and notification deliveries to keep. `0` keeps everything forever and logs a warning. |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
 | `COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS` | `example.com,connectivitycheck.gstatic.com` | Health-check probe targets. |
@@ -604,58 +602,27 @@ upstream operator still sees all of them — encryption changes *who* you trust,
 it does not remove the need to trust someone. Queries Cogwheel answers from its
 blocklists or cache never leave the house at all, encrypted or not.
 
-### 9.2 How blocked names are answered, and anti-adblock walls
+### 9.2 How blocked names are answered
 
 `COGWHEEL_BLOCKING__MODE`, or `--block-mode` on the installer:
 
-| Mode | Answer | Effect on the client |
-|---|---|---|
-| `null_ip` *(default)* | `0.0.0.0` / `::` | Connection to an address nothing accepts |
-| `nxdomain` | `NXDOMAIN` | DNS failure |
-| `nodata` | `NOERROR`, no answers | No address |
-| `refused` | `REFUSED` | DNS failure |
-| `sinkhole` | this appliance's address | Request succeeds, body is empty |
+| Mode | Answer |
+|---|---|
+| `null_ip` *(default)* | `0.0.0.0` / `::` |
+| `nxdomain` | `NXDOMAIN` |
+| `nodata` | `NOERROR` with no answers |
+| `refused` | `REFUSED` |
 
-**Why `sinkhole` exists.** With `0.0.0.0` the client opens a connection nothing
-accepts. Depending on the device that is refused instantly or hangs until
-timeout, so a single blocked third-party script can stall a page for seconds.
-It is also *loud*: a failed `<script src=…>` fires `onerror`, and "did the ad
-script fail to load?" is the most common way a site detects a blocker and puts
-up a wall. In `sinkhole` mode a local responder accepts the connection and
-returns a valid empty resource — empty JavaScript for `.js`, a 1×1 transparent
-GIF for images, `{}` for JSON — so pages render immediately and nothing errors.
+`null_ip` is the default because clients handle it most predictably. The others
+are there because people have preferences; none of them changes what is blocked,
+only how the "no" is phrased.
 
-```sh
-sudo ./scripts/install.sh --block-mode sinkhole
-```
-
-**Read this before relying on it.** It only helps for plain **HTTP**. An
-`https://` ad script makes the client open TLS to this appliance for a hostname
-Cogwheel holds no certificate for, so the handshake fails and the browser
-reports an error exactly as it did before. Most third-party ad and tracker
-resources are HTTPS today, which means **a site determined to detect blocking
-still can.** Making HTTPS resources appear to load would require issuing a
-certificate for every blocked domain from a CA installed on every device in the
-house — a machine-in-the-middle of your own network. That is a far larger
-security decision than ad blocking, and Cogwheel does not do it.
-
-What `sinkhole` reliably buys is the first half: blocked requests fail
-instantly and identically on every device, instead of stalling on some of them.
-That is the difference most people actually notice. If a site walls you anyway,
-the remedy is allowlisting what that site needs, not defeating the check.
-
-**Cogwheel never fetches ads and never reports impressions.** A DNS resolver
-hands back an address; it does not load pages or fire tracking pixels, so there
-is no impression for it to signal. Fabricating one would mean billing
-advertisers for something no person ever saw — fraud against the advertiser
-rather than a defence against tracking — so no mode here does that.
-
-`sinkhole` needs a port to listen on (80 by default, `--sinkhole-port` to
-change it) and needs to know the address clients reach it on. It takes that
-from the advertised targets the installers detect; set
-`COGWHEEL_BLOCKING__SINKHOLE_ADDRESS` if the guess is wrong. If it cannot
-determine one, the server refuses to start rather than quietly blocking a
-different way.
+Cogwheel never fetches ads and never reports impressions. A DNS resolver hands
+back an address; it does not load pages or fire tracking pixels, so there is no
+impression for it to signal. Some sites detect DNS-level blocking and ask you to
+turn it off — that is a property of blocking at this layer, and defeating it
+would mean intercepting HTTPS for every device on your network, which is a much
+larger security decision than ad blocking and not something this does.
 
 ### 9.3 Caching, and what to do when a site breaks
 

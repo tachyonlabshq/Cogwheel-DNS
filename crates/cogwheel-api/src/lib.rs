@@ -166,37 +166,18 @@ impl Default for RetentionConfig {
     }
 }
 
-/// How a blocked name is answered, and whether a local sink is run for it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// How a blocked name is answered.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockingConfig {
     /// Response returned for a blocked name.
     pub mode: BlockResponseMode,
-    /// Where the sink listens. Only used by [`BlockResponseMode::Sinkhole`].
-    pub sinkhole_bind_addr: SocketAddr,
-    /// Address handed to clients for blocked names in sinkhole mode. When
-    /// unset the server fills it in from its own advertised address, because
-    /// the sink is only reachable at an address clients can actually route to.
-    pub sinkhole_address: Option<IpAddr>,
-}
-
-impl Default for BlockingConfig {
-    fn default() -> Self {
-        Self {
-            // Unchanged from what shipped: an all-zeros answer. Sinkhole is
-            // opt-in because it binds another privileged port, and a port that
-            // appears without being asked for is a surprise on someone's LAN.
-            mode: BlockResponseMode::NullIp,
-            sinkhole_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 80),
-            sinkhole_address: None,
-        }
-    }
 }
 
 /// The answer a blocked lookup receives.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockResponseMode {
-    /// `0.0.0.0` / `::`. The default, and what every earlier version did.
+    /// `0.0.0.0` / `::`. The default.
     #[default]
     NullIp,
     /// `NXDOMAIN`, as though the name did not exist.
@@ -205,10 +186,6 @@ pub enum BlockResponseMode {
     NoData,
     /// `REFUSED`.
     Refused,
-    /// The appliance's own address, where a local responder answers every
-    /// request immediately with a valid empty resource. See the `sinkhole`
-    /// module in the server for what this does and does not achieve.
-    Sinkhole,
 }
 
 impl FromStr for BlockResponseMode {
@@ -220,7 +197,6 @@ impl FromStr for BlockResponseMode {
             "nxdomain" | "nx_domain" => Ok(Self::NxDomain),
             "nodata" | "no_data" => Ok(Self::NoData),
             "refused" => Ok(Self::Refused),
-            "sinkhole" | "sink" => Ok(Self::Sinkhole),
             _ => Err(ApiError::InvalidEnv(value.to_string())),
         }
     }
@@ -274,14 +250,6 @@ impl AppConfig {
         }
         if let Some(value) = env_get("COGWHEEL_BLOCKING__MODE") {
             config.blocking.mode = BlockResponseMode::from_str(&value)?;
-        }
-        if let Some(value) = env_get("COGWHEEL_BLOCKING__SINKHOLE_BIND_ADDR") {
-            config.blocking.sinkhole_bind_addr =
-                SocketAddr::from_str(&value).map_err(|_| ApiError::InvalidEnv(value.clone()))?;
-        }
-        if let Some(value) = env_get("COGWHEEL_BLOCKING__SINKHOLE_ADDRESS") {
-            config.blocking.sinkhole_address =
-                Some(IpAddr::from_str(&value).map_err(|_| ApiError::InvalidEnv(value.clone()))?);
         }
         if let Some(value) = env_get("COGWHEEL_UPSTREAM__SERVERS") {
             config.upstream.servers = value
