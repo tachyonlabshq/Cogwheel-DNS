@@ -157,7 +157,7 @@ export function ClassifierScreen() {
               <div className="space-y-6">
                 <fieldset>
                   <legend className="font-medium text-foreground text-sm">Mode</legend>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  <div className="mt-2 grid gap-6 sm:grid-cols-3">
                     {MODES.map((mode) => (
                       <ChoiceCard
                         busy={busy === `classifier-mode-${mode}`}
@@ -189,7 +189,7 @@ export function ClassifierScreen() {
                     These are the model's measured rates on its held-out evaluation split, not estimates.
                     Higher recall always costs false positives.
                   </p>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <div className="mt-3 grid gap-6 sm:grid-cols-3">
                     {SENSITIVITY_ORDER.map((sensitivity) => (
                       <SensitivityCard
                         busy={busy === `classifier-sensitivity-${sensitivity}`}
@@ -238,7 +238,7 @@ export function ClassifierScreen() {
               description="Counters since the appliance started."
               title="Runtime behaviour"
             >
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
                 <StatTile
                   hint="Domains the model has actually scored"
                   label="Scored"
@@ -345,7 +345,7 @@ function ModelCard({ status }: { status: ClassifierStatus }) {
       description="Everything below is reported by the appliance, not claimed by this page."
       title="Model"
     >
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           hint="Area under the ROC curve on the held-out split"
           label="ROC-AUC"
@@ -541,7 +541,7 @@ function AdaptationDetail({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           hint={
             ready
@@ -736,13 +736,13 @@ function OutcomeFrame({
   // in the matching `-foreground` (700 light / 300 dark) or in `--foreground`.
   const toneClass =
     tone === "good"
-      ? "border-success/24 border-l-success bg-success/8 text-success-foreground"
+      ? "border-success/24 bg-success/8 text-success-foreground"
       : tone === "warn"
-        ? "border-warning/32 border-l-warning bg-warning/10 text-warning-foreground"
-        : "border-border border-l-border bg-muted text-foreground";
+        ? "border-warning/32 bg-warning/10 text-warning-foreground"
+        : "border-border bg-muted text-foreground";
 
   return (
-    <div className={cn("space-y-2 rounded-xl border border-l-2 px-4 py-3", toneClass)} role="status">
+    <div className={cn("space-y-2 rounded-xl border px-4 py-3", toneClass)} role="status">
       <p className="flex items-center gap-2 font-medium text-sm">
         <Icon aria-hidden className="size-4 shrink-0" />
         {title}

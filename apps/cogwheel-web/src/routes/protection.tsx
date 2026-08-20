@@ -277,7 +277,7 @@ function BlocklistsPane() {
               value={url}
             />
           </FieldRow>
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-6 sm:grid-cols-3">
             <SelectField
               label="Profile"
               onChange={setProfile}
@@ -588,7 +588,7 @@ function ProfilesPane() {
   };
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
       <SectionCard
         actions={
           <Button onClick={startNew} size="sm" variant="outline">
@@ -672,7 +672,7 @@ function ProfilesPane() {
         title={creating ? "New profile" : `Edit ${draft.name || "profile"}`}
       >
         <div className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-[90px_minmax(0,1fr)]">
+          <div className="grid gap-6 sm:grid-cols-[90px_minmax(0,1fr)]">
             <TextField
               label="Emoji"
               onChange={(value) => setDraft((current) => ({ ...current, emoji: value }))}
@@ -696,7 +696,7 @@ function ProfilesPane() {
 
           <section>
             <h3 className="font-medium text-foreground text-sm">OISD presets</h3>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <div className="mt-2 grid gap-6 sm:grid-cols-2">
               {oisdProfileOptions.map((preset) => {
                 const selected = draft.blocklists.some((entry) => entry.id === preset.id);
                 return (

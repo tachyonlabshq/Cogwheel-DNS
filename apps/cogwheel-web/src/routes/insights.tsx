@@ -126,7 +126,7 @@ export function InsightsScreen() {
         {loading ? (
           <LoadingSkeleton rows={4} variant="cards" />
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               hint="Rolling window held in memory; lost on restart"
               label="Observed queries"
@@ -154,7 +154,7 @@ export function InsightsScreen() {
           </div>
         )}
 
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-6 xl:grid-cols-2">
           <SectionCard description="Busiest destinations in the rolling window." title="Top queried domains">
             <AsyncRegion
               empty={
@@ -304,7 +304,7 @@ export function InsightsScreen() {
               tone="warn"
             />
           ) : budget.data ? (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
               <StatTile
                 label="Release ready"
                 tone={budget.data.release_ready ? "good" : "warn"}

@@ -39,5 +39,5 @@ export function FormField({
 }
 
 export function FieldRow({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <div className={cn("grid gap-4 sm:grid-cols-2", className)}>{children}</div>;
+  return <div className={cn("grid gap-6 sm:grid-cols-2", className)}>{children}</div>;
 }

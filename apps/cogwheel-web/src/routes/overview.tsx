@@ -156,7 +156,7 @@ export function OverviewScreen() {
         {loading ? (
           <LoadingSkeleton rows={4} variant="cards" />
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               footer={
                 state.paused && remaining > 0 ? (
@@ -222,7 +222,7 @@ export function OverviewScreen() {
           </div>
         )}
 
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-6 xl:grid-cols-2">
           <SectionCard
             description="Busiest destinations seen by this resolver."
             title="Top queried domains"
@@ -277,7 +277,7 @@ export function OverviewScreen() {
             />
           ) : (
             <div className="space-y-5">
-              <dl className="grid gap-2 sm:grid-cols-2">
+              <dl className="grid gap-6 sm:grid-cols-2">
                 {data.resolverAccess.dns_targets.map((target) => (
                   <div
                     className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2"
@@ -303,7 +303,7 @@ export function OverviewScreen() {
 
               <div className="space-y-2">
                 <h3 className="font-medium text-foreground text-sm">Per-platform steps</h3>
-                <ul className="grid gap-2 sm:grid-cols-2">
+                <ul className="grid gap-6 sm:grid-cols-2">
                   {platforms.map((entry) => (
                     <li className="rounded-lg border border-border p-3" key={entry.platform}>
                       <p className="font-medium text-foreground text-sm">{entry.platform}</p>
@@ -317,7 +317,7 @@ export function OverviewScreen() {
           )}
         </SectionCard>
 
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-6 xl:grid-cols-2">
           <SectionCard description="Counters reported by the DNS runtime." title="Resolver summary">
             <dl className="divide-y divide-border">
               <SummaryRow label="Protection">

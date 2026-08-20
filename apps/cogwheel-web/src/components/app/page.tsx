@@ -12,7 +12,7 @@ export function PageShell({ children, className }: { children: React.ReactNode; 
 
 /** 32px between major blocks, per the section rhythm in the brief. */
 export function PageSections({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <div className={cn("flex flex-col gap-8", className)}>{children}</div>;
+  return <div className={cn("flex flex-col gap-6", className)}>{children}</div>;
 }
 
 export function PageHeader({
@@ -25,7 +25,7 @@ export function PageHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <header className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+    <header className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
       <div className="min-w-0">
         <h1 className="display-tight font-semibold text-2xl text-foreground">{title}</h1>
         {description ? (

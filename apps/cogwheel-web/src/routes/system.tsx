@@ -230,7 +230,7 @@ function DiagnosticsPane() {
             tone={health.degraded ? "bad" : "good"}
           />
 
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               label="Queries"
               value={formatCount(snapshot.queries_total)}
@@ -345,7 +345,7 @@ function DiagnosticsPane() {
         }
         title="Load test"
       >
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-6 sm:grid-cols-3">
           <TextField
             hint="Unbounded server-side; keep it short."
             inputMode="numeric"
@@ -369,7 +369,7 @@ function DiagnosticsPane() {
         </div>
 
         {loadTest ? (
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-4 grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               label="Sent"
               tone={loadTest.success ? "good" : "bad"}
@@ -499,7 +499,7 @@ function DiagnosticsPane() {
         }
         title="Tailscale"
       >
-        <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <dl className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryTile label="Host" value={tailscale.hostname ?? "Unknown"} />
           <SummaryTile
             label="Tailnet"
@@ -547,7 +547,7 @@ function DiagnosticsPane() {
           />
         ) : version.data ? (
           <>
-            <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <dl className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
               <SummaryTile
                 label="Cogwheel"
                 value={version.data.cogwheel_version}
@@ -769,7 +769,7 @@ function SyncPane() {
         description="This node's identity and replication state."
         title="Node"
       >
-        <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <dl className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
           <SummaryTile label="Profile" value={sync.profile} />
           <SummaryTile label="Revision" value={formatCount(sync.revision)} />
           <SummaryTile label="Transport" value={sync.transport_mode} />
@@ -1074,7 +1074,7 @@ function BackupPane() {
             title="Could not read the backup"
           />
         ) : backup.data ? (
-          <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <dl className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <SummaryTile label="Format" value={backup.data.version} />
             <SummaryTile
               label="Created"
@@ -1293,7 +1293,7 @@ function AuditPane({
         description="Suggested next steps, computed from the current dashboard state."
         title="Guided recovery"
       >
-        <ul className="grid gap-3 xl:grid-cols-3">
+        <ul className="grid gap-6 xl:grid-cols-3">
           {actions.map((action) => (
             <li
               className="flex flex-col rounded-xl border border-border p-4"

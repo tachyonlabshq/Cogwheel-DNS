@@ -595,7 +595,7 @@ function IntegrationsPane() {
             />
           </FieldRow>
 
-          <dl className="grid gap-2 sm:grid-cols-3">
+          <dl className="grid gap-6 sm:grid-cols-3">
             <SummaryTile label="Node ID" value={federated.node_id} />
             <SummaryTile label="Privacy mode" value={federated.privacy_mode} />
             <SummaryTile
@@ -621,7 +621,7 @@ function GuardPane() {
         description="The runtime guard decides when the dashboard reports “Needs attention” and when a new ruleset is auto-rolled-back. It is configured by environment variables on the appliance; there is no endpoint to change it from here."
         title="Runtime guard (read-only)"
       >
-        <dl className="grid gap-2 sm:grid-cols-3">
+        <dl className="grid gap-6 sm:grid-cols-3">
           <SummaryTile
             label="Max upstream failure delta"
             value={formatCount(guard.max_upstream_failures_delta)}

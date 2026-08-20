@@ -50,7 +50,7 @@ export function ErrorState({
     <div
       className={cn(
         // Tint + 700-weight text: the accent is the surface, never the copy.
-        "flex flex-col gap-3 rounded-xl border border-destructive/24 border-l-2 border-l-destructive",
+        "flex flex-col gap-3 rounded-xl border border-destructive/24",
         "bg-destructive/8 px-4 py-3",
         className,
       )}
@@ -90,7 +90,7 @@ export function LoadingSkeleton({
     return (
       <div
         aria-busy="true"
-        className={cn("grid gap-4 sm:grid-cols-2 xl:grid-cols-4", className)}
+        className={cn("grid gap-6 sm:grid-cols-2 xl:grid-cols-4", className)}
         aria-label="Loading"
       >
         {keys.map((key) => (
@@ -175,17 +175,19 @@ export function NoticeBanner({
   actions?: React.ReactNode;
   className?: string;
 }) {
+  // Tone is carried by the surface tint and the border, not by a coloured rule
+  // down one edge. The strip read as decoration rather than information.
   const toneClass =
     tone === "bad"
-      ? "border-l-destructive bg-destructive/8 text-destructive-foreground"
+      ? "border-destructive/24 bg-destructive/8 text-destructive-foreground"
       : tone === "warn"
-        ? "border-l-warning bg-warning/10 text-warning-foreground"
-        : "border-l-border bg-muted text-foreground";
+        ? "border-warning/32 bg-warning/10 text-warning-foreground"
+        : "border-border bg-muted text-foreground";
 
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-xl border border-border border-l-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-2 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
         toneClass,
         className,
       )}

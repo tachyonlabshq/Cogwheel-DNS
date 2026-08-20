@@ -36,15 +36,8 @@ function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void })
         tooltip={item.shortcut ? `${item.label} (${item.shortcut})` : item.label}
       >
         <NavLink onClick={onNavigate} to={item.to}>
-          {/* A 2px rule marks the active row so the state does not depend on
-              background tint alone at low contrast settings. */}
-          <span
-            aria-hidden
-            className={cn(
-              "absolute inset-y-1 left-0 w-0.5 rounded-full",
-              active ? "bg-primary" : "bg-transparent",
-            )}
-          />
+          {/* The active row is marked by its surface and text colour, plus the
+              aria-current NavLink sets. No accent rule down the edge. */}
           <item.icon aria-hidden />
           <span className="flex-1 truncate">{item.label}</span>
           {item.shortcut ? (
